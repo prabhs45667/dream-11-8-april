@@ -2,36 +2,42 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from typing import Dict, List, Tuple
+import os
 
 class DataPreprocessor:
-    def __init__(self):
+    def __init__(self, data_dir="dataset"):
         self.label_encoders = {}
+        self.data_dir = data_dir
         
     def load_data(self) -> Dict[str, pd.DataFrame]:
         """Load all required datasets"""
         data = {}
         
         # Load main datasets
-        data['deliveries'] = pd.read_csv('dataset/ipl_2025_deliveries.csv')
-        data['fantasy'] = pd.read_csv('dataset/Final_Fantasy_data.csv')
-        data['fielding'] = pd.read_csv('dataset/Fielding_data.csv')
-        data['matches'] = pd.read_csv('dataset/IPL_Matches_2008_2022.csv')
-        data['ball_by_ball'] = pd.read_csv('dataset/IPL_Ball_by_Ball_2008_2022.csv')
-        data['squads'] = pd.read_csv('dataset/SquadPlayerNames_IndianT20League - SquadData_AllTeams.csv')
-        
-        # Load performance datasets
-        data['wickets'] = pd.read_csv('dataset/Most Wickets All Seasons Combine.csv')
-        data['sixes'] = pd.read_csv('dataset/Most Sixes Per Innings All Seasons Combine.csv')
-        data['runs_per_over'] = pd.read_csv('dataset/Most Runs Per Over All Seasons Combine.csv')
-        data['runs_conceded'] = pd.read_csv('dataset/Most Runs Conceded Per Innings All Seasons Combine.csv')
-        data['runs'] = pd.read_csv('dataset/Most Runs All Seasons Combine.csv')
-        data['fours'] = pd.read_csv('dataset/Most Fours Per Innings All Seasons Combine.csv')
-        data['dot_balls'] = pd.read_csv('dataset/Most Dot Balls Per Innings All Seasons Combine.csv')
-        data['fastest_50'] = pd.read_csv('dataset/Fastest Fifties All Seasons Combine.csv')
-        data['fastest_100'] = pd.read_csv('dataset/Fastest Centuries All Seasons Combine.csv')
-        data['bowling_sr'] = pd.read_csv('dataset/Best Bowling Strike Rate Per Innings All Seasons Combine.csv')
-        data['bowling_econ'] = pd.read_csv('dataset/Best Bowling Economy Per Innings All Seasons Combine.csv')
-        
+        try:
+            data['deliveries'] = pd.read_csv(os.path.join(self.data_dir, 'ipl_2025_deliveries.csv'))
+            data['fantasy'] = pd.read_csv(os.path.join(self.data_dir, 'Final_Fantasy_data.csv'))
+            data['fielding'] = pd.read_csv(os.path.join(self.data_dir, 'Fielding_data.csv'))
+            data['matches'] = pd.read_csv(os.path.join(self.data_dir, 'IPL_Matches_2008_2022.csv'))
+            data['ball_by_ball'] = pd.read_csv(os.path.join(self.data_dir, 'IPL_Ball_by_Ball_2008_2022.csv'))
+            data['squads'] = pd.read_csv(os.path.join(self.data_dir, 'SquadPlayerNames_IndianT20League - SquadData_AllTeams.csv'))
+            
+            # Load performance datasets
+            data['wickets'] = pd.read_csv(os.path.join(self.data_dir, 'Most Wickets All Seasons Combine.csv'))
+            data['sixes'] = pd.read_csv(os.path.join(self.data_dir, 'Most Sixes Per Innings All Seasons Combine.csv'))
+            data['runs_per_over'] = pd.read_csv(os.path.join(self.data_dir, 'Most Runs Per Over All Seasons Combine.csv'))
+            data['runs_conceded'] = pd.read_csv(os.path.join(self.data_dir, 'Most Runs Conceded Per Innings All Seasons Combine.csv'))
+            data['runs'] = pd.read_csv(os.path.join(self.data_dir, 'Most Runs All Seasons Combine.csv'))
+            data['fours'] = pd.read_csv(os.path.join(self.data_dir, 'Most Fours Per Innings All Seasons Combine.csv'))
+            data['dot_balls'] = pd.read_csv(os.path.join(self.data_dir, 'Most Dot Balls Per Innings All Seasons Combine.csv'))
+            data['fastest_50'] = pd.read_csv(os.path.join(self.data_dir, 'Fastest Fifties All Seasons Combine.csv'))
+            data['fastest_100'] = pd.read_csv(os.path.join(self.data_dir, 'Fastest Centuries All Seasons Combine.csv'))
+            data['bowling_sr'] = pd.read_csv(os.path.join(self.data_dir, 'Best Bowling Strike Rate Per Innings All Seasons Combine.csv'))
+            data['bowling_econ'] = pd.read_csv(os.path.join(self.data_dir, 'Best Bowling Economy Per Innings All Seasons Combine.csv'))
+        except FileNotFoundError as e:
+            print(f"Warning: {e}")
+            # Continue with available data
+            
         return data
     
     def calculate_fantasy_points(self, row: pd.Series) -> float:

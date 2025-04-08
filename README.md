@@ -1,15 +1,102 @@
-# Dream11 Team Predictor
+# Dream11 IPL Team Predictor
 
-An advanced Dream11 Fantasy Cricket team prediction system that uses machine learning to predict the best possible team for any IPL match.
+A machine learning-based application to predict the best Dream11 team for IPL matches using player performance data from 2022-2024.
 
 ## Features
 
-- Predicts optimal Dream11 team based on player performance, match conditions, and historical data
-- Uses advanced machine learning models (XGBoost, LightGBM, Neural Networks)
-- Implements linear programming for team optimization
-- Provides backup players for each role
-- Interactive Streamlit interface with visualizations
-- Downloads predicted team as CSV
+- **Data-Driven Predictions**: Uses actual ball-by-ball data from IPL 2022-2024 to predict player performance
+- **Multiple ML Models**: Combines Decision Trees, KNN, Random Forest, Gradient Boosting, XGBoost, and Neural Networks
+- **Optimized Team Selection**: Uses Linear Programming to select the optimal team while respecting Dream11 constraints
+- **Captain & Vice-Captain Selection**: Automatically selects the best captain and vice-captain
+- **Interactive UI**: Easy-to-use Streamlit interface for team prediction
+
+## Quick Start
+
+1. **Setup Environment**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Run the App**:
+   ```bash
+   streamlit run improved_app.py
+   ```
+
+3. **First-time Setup**: The first time you run the app, it will:
+   - Load and preprocess the IPL data
+   - Train multiple prediction models
+   - Save models for future use
+   - Generate feature importance visualization
+
+4. **Predict Teams**: 
+   - Select two teams from the dropdown menus
+   - Click "Predict Dream11 Team"
+   - View and download your optimized Dream11 team
+
+## Data Requirements
+
+The following data files should be in the `dataset` folder:
+- `ipl_2022_deliveries.csv`, `ipl_2023_deliveries.csv`, `ipl_2024_deliveries.csv`: Ball-by-ball data
+- `SquadPlayerNames_IndianT20League - SquadData_AllTeams.csv`: Player information including roles and credits
+
+## Implementation Details
+
+### 1. Data Processing & Feature Engineering
+- Extracts batting and bowling statistics from ball-by-ball data
+- Creates comprehensive player features (strike rate, economy, etc.)
+- Calculates fantasy points based on Dream11 scoring rules
+
+### 2. Model Training
+- Trains 6 different models and selects the best performing one:
+  - Decision Tree
+  - K-Nearest Neighbors
+  - Random Forest
+  - Gradient Boosting
+  - XGBoost
+  - Neural Network
+
+### 3. Team Optimization
+- Uses PuLP linear programming to optimize team selection
+- Enforces Dream11 constraints:
+  - 11 players total
+  - 1-4 wicket-keepers
+  - 3-6 batsmen
+  - 1-4 all-rounders
+  - 3-6 bowlers
+  - Maximum 7 players from one team
+  - Maximum 100 credits
+
+### 4. Interactive Visualization
+- Shows team composition breakdown
+- Displays predicted points for each player
+- Highlights captain and vice-captain selections
+
+## Future Improvements
+
+For future versions, consider implementing:
+- Reinforcement learning for adaptive team selection
+- Player form tracking over time
+- Opposition-specific performance analysis
+- Weather and pitch condition integration
+- Integration with real-time data sources
+
+## Requirements
+
+```
+pandas
+numpy
+scikit-learn
+xgboost
+tensorflow
+pulp
+streamlit
+matplotlib
+seaborn
+joblib
+tqdm
+```
+
+Create a `requirements.txt` file with the above dependencies.
 
 ## Installation
 
