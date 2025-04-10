@@ -469,6 +469,9 @@ class TeamOptimizer:
             # Limit to max 2 players per team
             team_count = {team: 0 for team in teams}
             
+            # Ensure available_players has a unique index before looping
+            available_players = available_players.reset_index(drop=True)
+
             # Try to select one player from each role
             for role in roles_to_select:
                 if 'role' not in available_players.columns:
@@ -529,6 +532,9 @@ class TeamOptimizer:
                     if mask_indices:
                         remaining_available = remaining_available.iloc[mask_indices].copy().reset_index(drop=True)
                 
+                # Ensure remaining_available has unique index before iterating
+                remaining_available = remaining_available.reset_index(drop=True)
+
                 if not remaining_available.empty:
                     # Add a random factor for diversity
                     remaining_available.loc[:, 'random'] = np.random.rand(len(remaining_available))
@@ -602,7 +608,8 @@ class TeamOptimizer:
             if all_players_df is None or all_players_df.empty:
                 return pd.DataFrame()
                 
-            all_players_df = all_players_df.copy().reset_index(drop=True)
+            # Start with a clean index
+            available = all_players_df.copy().reset_index(drop=True)
             
             # Basic standardization of column names
             if 'Player Name' in all_players_df.columns and 'name' not in all_players_df.columns:

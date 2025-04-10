@@ -7,8 +7,8 @@ import time
 import pickle
 import traceback
 import logging
-from quick_implementation_plan import Dream11Predictor
 from team_optimizer import TeamOptimizer
+from model_integration import Dream11ModelIntegrator
 import plotly.graph_objects as go
 import plotly.express as px
 import matplotlib.pyplot as plt
@@ -16,60 +16,104 @@ from data_preprocessor import DataPreprocessor
 from role_mapper import RoleMapper
 from sklearn.ensemble import RandomForestRegressor
 
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 class Dream11App:
     def __init__(self, data_dir="dataset", use_tensorflow=False):
         """Initialize Dream11App"""
+        logger.info("Initializing Dream11App...")
         self.data_dir = data_dir
         self.use_tensorflow = use_tensorflow
-        self.models = {}
         self.data_loaded = False
-        self.deliveries_df = None  # Initialize the deliveries_df attribute
-        self.team_squads = None  # Initialize the team_squads attribute
+        self.deliveries_df = None
+        self.team_squads = None
         self.data_preprocessor = DataPreprocessor(data_dir)
-        self.optimizer = TeamOptimizer()  # Initialize the team optimizer
-        self.role_mapper = RoleMapper()  # Initialize the role mapper
-        self.team_predictor = Dream11Predictor(data_dir)  # Initialize team predictor
-        
+        self.optimizer = TeamOptimizer()
+        self.role_mapper = RoleMapper()
+        self.pitch_types = ['balanced', 'batting_friendly', 'bowling_friendly']
+        try:
+            self.model_integrator = Dream11ModelIntegrator()
+            # Get actual pitch types supported by loaded models
+            loaded_pitch_types = self.model_integrator.get_available_pitch_types()
+            if loaded_pitch_types: # Check if list is not empty
+                self.pitch_types = loaded_pitch_types
+            logger.info(f"ModelIntegrator initialized successfully. Supported pitch types: {self.pitch_types}")
+        except Exception as e:
+            logger.error(f"Failed to initialize ModelIntegrator: {e}", exc_info=True)
+            # Keep self.model_integrator as None - app will show error later
+
         # Define team codes and venues
+        self.available_teams = self._get_available_teams()
         self.venues = ["M. Chinnaswamy Stadium, Bangalore", "Eden Gardens, Kolkata", 
                      "Wankhede Stadium, Mumbai", "MA Chidambaram Stadium, Chennai",
                      'Narendra Modi Stadium, Ahmedabad', "Arun Jaitley Stadium, Delhi"]
         self.match_types = ["League", "Qualifier", "Eliminator", "Final"]
         
-        # Load model if available
+        # Load initial data (like squad file)
         try:
             self.load_data()
         except Exception as e:
-            print(f"Error loading data: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"Error loading initial data: {str(e)}", exc_info=True)
+            st.warning("Could not load initial squad data.")
+        logger.info("Dream11App initialization complete.")
         
-    def load_data(self):
-        """Load and preprocess the data"""
+    def _get_available_teams(self):
+        """Helper to get team codes from the squad file."""
+        squad_file = os.path.join(self.data_dir, "SquadPlayerNames_IndianT20League - SquadData_AllTeams.csv")
+        default_teams = ['CHE', 'DC', 'GT', 'KKR', 'LSG', 'MI', 'PBKS', 'RCB', 'RR', 'SRH']
         try:
-            # Initialize deliveries_df and squad data directly
-            file_path_2025 = os.path.join(self.data_dir, 'ipl_2025_deliveries.csv')
-            squad_file = os.path.join(self.data_dir, "SquadPlayerNames_IndianT20League - SquadData_AllTeams.csv")
-            
-            if os.path.exists(file_path_2025):
-                self.deliveries_df = pd.read_csv(file_path_2025)
-                print(f"Loaded 2025 data from {file_path_2025} with {len(self.deliveries_df)} deliveries")
-            else:
-                print(f"Warning: No deliveries data found at {file_path_2025}")
-                
             if os.path.exists(squad_file):
-                self.team_squads = pd.read_csv(squad_file)
-                print(f"Loaded squad data from {squad_file}")
+                squad_df = pd.read_csv(squad_file)
+                # Try multiple common column names for team codes
+                for col_name in ['Team Code', 'TeamCode', 'team_code', 'Team', 'team']:
+                     if col_name in squad_df.columns:
+                          # Standardize team codes to uppercase and remove duplicates
+                          teams = sorted(list(squad_df[col_name].astype(str).str.upper().unique()))
+                          if teams:
+                              logger.info(f"Found teams {teams} in column '{col_name}' of {squad_file}")
+                              return teams
+                logger.warning(f"Could not find a suitable team column in {squad_file}. Using default teams.")
             else:
-                print(f"Warning: No squad data found at {squad_file}")
-                
-            # Create team predictor
-            self.team_predictor = Dream11Predictor(self.data_dir)
-            self.data_loaded = True
-            
-            return True
+                 logger.warning(f"Squad file not found at {squad_file}. Using default teams.")
+            return default_teams # Default if file missing/no teams/no suitable column
         except Exception as e:
-            print(f"Error loading data: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"Error reading team codes from squad file {squad_file}: {e}")
+            return default_teams # Default on error
+    
+    def load_data(self):
+        """Load and preprocess the data (mainly ensures squad data is available)"""
+        logger.info("Loading data...")
+        try:
+            # Load squad data if not already loaded
+            if self.team_squads is None:
+                squad_file = os.path.join(self.data_dir, "SquadPlayerNames_IndianT20League - SquadData_AllTeams.csv")
+                if os.path.exists(squad_file):
+                    self.team_squads = pd.read_csv(squad_file)
+                    logger.info(f"Loaded squad data from {squad_file}: {len(self.team_squads)} records")
+                    self.data_loaded = True # Consider data loaded if squad is present
+                else:
+                    logger.error(f"Squad data file not found: {squad_file}")
+                    self.data_loaded = False
+                    return False
+            else:
+                 logger.info("Squad data already loaded.")
+                 self.data_loaded = True
+
+            # Load deliveries data if needed (optional for prediction, but useful)
+            if self.deliveries_df is None:
+                 file_path_2025 = os.path.join(self.data_dir, 'ipl_2025_deliveries.csv')
+                 if os.path.exists(file_path_2025):
+                     self.deliveries_df = pd.read_csv(file_path_2025)
+                     logger.info(f"Loaded 2025 deliveries data from {file_path_2025} with {len(self.deliveries_df)} deliveries")
+                 else:
+                     logger.warning(f"No deliveries data found at {file_path_2025}")
+
+            return self.data_loaded
+        except Exception as e:
+            logger.error(f"Error loading data: {str(e)}", exc_info=True)
+            self.data_loaded = False
             return False
             
     def train_models(self):
@@ -78,7 +122,7 @@ class Dream11App:
             if not self.data_loaded:
                 self.load_data()
                 
-            results = self.team_predictor.train_models()
+            results = self.model_integrator.train_models()
             self.models_trained = True
             return results
         except Exception as e:
@@ -655,26 +699,19 @@ class Dream11App:
             squad_data['predicted_points'] = squad_data['Credits'].values * 100 if 'Credits' in squad_data.columns else np.ones(len(squad_data)) * 100
             return squad_data
     
-    def _load_and_check_lineup_data(self, team1, team2):
-        """Load lineup data for the selected teams
-        
-        Args:
-            team1 (str): First team code
-            team2 (str): Second team code
-            
-        Returns:
-            pd.DataFrame: DataFrame containing players from the selected teams
-        """
+    def _load_and_check_lineup_data(self, home_team, away_team):
+        """Loads squad data for the two teams and performs basic checks."""
         try:
             # Get team squads for both teams
-            team_squads = self.get_team_squads([team1, team2])
+            team_squads = self.get_team_squads([home_team, away_team])
             
             # Check if team_squads are available
             if team_squads is None or team_squads.empty:
-                print(f"No squad data found for teams {team1} and {team2}")
+                print(f"No squad data found for teams {home_team} and {away_team}")
                 return None
             
             # Return squads data
+            logger.info(f"Loaded and checked lineup data for {home_team} vs {away_team}")
             return team_squads
         except Exception as e:
             print(f"Error in _load_and_check_lineup_data: {str(e)}")
@@ -700,7 +737,7 @@ class Dream11App:
                 
                 # Try to use the team predictor if available
                 try:
-                    predicted_points = self.team_predictor.predict_player_points(squad_data)
+                    predicted_points = self.model_integrator.predict_player_points(squad_data)
                     if predicted_points is not None:
                         squad_data['predicted_points'] = predicted_points
                 except Exception as e:
@@ -725,232 +762,327 @@ class Dream11App:
                 traceback.print_exc()
             return squad_data
             
-    def predict_team(self, home_team, away_team, venue=None, match_type=None, pitch_type=None, verbose=True):
-        """Predict the best Dream11 team for a match."""
-        logging.info(f"Predicting team for {home_team} vs {away_team}")
-        
+    def predict_team(self, home_team, away_team, venue=None, match_type=None, pitch_type='balanced', verbose=True):
+        """Predict the best Dream11 team for a match using ModelIntegrator."""
+        logger.info(f"Predicting team for {home_team} vs {away_team} | Pitch: {pitch_type}")
+
         try:
-            # Load lineup data for both teams
+            # 1. Load lineup data for both teams
             team_squads = self._load_and_check_lineup_data(home_team, away_team)
             if team_squads is None or team_squads.empty:
-                if verbose:
-                    print("Failed to load lineup data. Please check if squad data is available.")
+                logger.error("Failed to load lineup data.")
+                st.error("Could not load player/squad data for the selected teams. Please check the dataset folder.")
                 return None
-                
-            # Standardize player roles
+
+            # 2. Ensure necessary columns exist
+            required_cols = ['Player Name', 'Team', 'Player Type', 'Credits']
+            missing_cols = [col for col in required_cols if col not in team_squads.columns]
+            if missing_cols:
+                logger.error(f"Squad data missing required columns: {missing_cols}")
+                st.error(f"Squad data is missing essential columns: {', '.join(missing_cols)}. Cannot proceed.")
+                return None
+
+            # 3. Standardize player roles *before* prediction
+            team_squads['Player Type'] = team_squads['Player Type'].astype(str)
             team_squads['Role'] = team_squads['Player Type'].apply(self.standardize_role)
-            
-            # Predict player points
-            if pitch_type and hasattr(self, 'predict_player_points_by_pitch'):
-                team_squads = self.predict_player_points_by_pitch(team_squads, pitch_type, verbose=verbose)
+            logger.info(f"Standardized roles for {len(team_squads)} players.")
+
+            # 4. Predict player points using ModelIntegrator
+            predicted_points_df = None
+            if self.model_integrator:
+                try:
+                    logger.info(f"Attempting prediction using ModelIntegrator for pitch: {pitch_type}")
+                    # Pass the original squad df, integrator handles feature eng.
+                    predicted_points_df = self.model_integrator.predict_player_points(
+                        player_data=team_squads.copy(), # Pass a copy
+                        pitch_type=pitch_type
+                    )
+                    # Validate the output
+                    if predicted_points_df is not None and not predicted_points_df.empty:
+                         if 'Player Name' not in predicted_points_df.columns or 'predicted_points' not in predicted_points_df.columns:
+                              logger.error("ModelIntegrator output missing required columns (\'Player Name\', \'predicted_points\').")
+                              predicted_points_df = None # Invalidate bad output
+                         else:
+                              logger.info(f"ModelIntegrator returned {len(predicted_points_df)} predictions.")
+                    else:
+                         logger.warning("ModelIntegrator returned None or empty DataFrame.")
+                         predicted_points_df = None # Ensure it's None if empty
+                except Exception as e:
+                    logger.error(f"Error predicting points with ModelIntegrator: {e}", exc_info=True)
+                    st.warning(f"Model prediction failed ({e}). Falling back to credit-based points.")
+                    predicted_points_df = None # Ensure fallback on error
             else:
-                team_squads = self._predict_player_points(team_squads, verbose=verbose)
-            
-            # Check role distribution in squad
+                logger.warning("ModelIntegrator not available. Using credit-based points.")
+                st.warning("Model Integrator not loaded. Using basic credit-based points.")
+                predicted_points_df = None # Explicitly set to None
+
+            # 5. Merge predicted points or use fallback
+            if predicted_points_df is not None:
+                 logger.info("Merging model predictions with squad data.")
+                 team_squads = pd.merge(
+                      team_squads,
+                      predicted_points_df[['Player Name', 'predicted_points']],
+                      on='Player Name',
+                      how='left'
+                 )
+                 missing_predictions = team_squads['predicted_points'].isnull().sum()
+                 if missing_predictions > 0:
+                      logger.warning(f"{missing_predictions} players had no predicted points after merge. Applying credit-based fallback.")
+                      team_squads['predicted_points'] = team_squads['predicted_points'].fillna(team_squads['Credits'] * 5)
+                 team_squads['predicted_points'] = pd.to_numeric(team_squads['predicted_points'], errors='coerce').fillna(0)
+            else:
+                logger.warning("Using credit-based points as primary source for all players.")
+                team_squads['predicted_points'] = team_squads['Credits'] * 10
+                team_squads['predicted_points'] = pd.to_numeric(team_squads['predicted_points'], errors='coerce').fillna(0)
+
+            team_squads['Credits'] = pd.to_numeric(team_squads['Credits'], errors='coerce').fillna(8.0)
+
+            if verbose:
+                 st.write("Top 10 Players by Predicted Points (after merge/fallback):")
+                 st.dataframe(team_squads[['Player Name', 'Team', 'Role', 'Credits', 'predicted_points']].sort_values('predicted_points', ascending=False).head(10))
+
+            # 6. Optimization Step
             role_counts = team_squads['Role'].value_counts().to_dict()
-            
-            # Check if at least one player is available for each required role (WK, BAT, BOWL)
-            required_roles = ['WK', 'BAT', 'BOWL']
-            missing_roles = [role for role in required_roles if role not in role_counts or role_counts[role] == 0]
-            
-            # Set default role requirements
-            if not missing_roles:
-                role_requirements = {'WK': (1, 4), 'BAT': (3, 6), 'AR': (1, 4), 'BOWL': (3, 6)}
-            else:
-                # Adjust requirements if any required roles are missing
-                if verbose:
-                    print(f"Warning: Missing players for roles: {missing_roles}")
-                role_requirements = {}
-                if 'WK' in role_counts and role_counts['WK'] > 0:
-                    role_requirements['WK'] = (1, 4)
-                if 'BAT' in role_counts and role_counts['BAT'] > 0:
-                    role_requirements['BAT'] = (3, 6)
-                if 'AR' in role_counts and role_counts['AR'] > 0:
-                    role_requirements['AR'] = (1, 4)
-                if 'BOWL' in role_counts and role_counts['BOWL'] > 0:
-                    role_requirements['BOWL'] = (3, 6)
-            
-            # Create team optimizer instance
-            optimizer = TeamOptimizer()
-            
-            # Prepare player data for optimization
+            required_roles_check = ['WK', 'BAT', 'AR', 'BOWL']
+            missing_roles = [role for role in required_roles_check if role not in role_counts or role_counts[role] == 0]
+
+            if missing_roles:
+                logger.warning(f"Squad data missing players for required roles: {missing_roles}")
+                st.warning(f"Warning: Not enough players found for roles: {', '.join(missing_roles)}. Team selection might be suboptimal.")
+
+            role_requirements = {'WK': (1, 4), 'BAT': (3, 6), 'AR': (1, 4), 'BOWL': (3, 6)}
+
             players_dict = {}
             for _, player in team_squads.iterrows():
-                players_dict[player['Player Name']] = {
+                 if pd.isna(player['Credits']) or pd.isna(player['predicted_points']):
+                      logger.warning(f"Skipping player {player['Player Name']} due to NaN credits/points.")
+                      continue
+                 players_dict[player['Player Name']] = {
                     'name': player['Player Name'],
                     'team': player['Team'],
                     'role': player['Role'],
-                    'credits': player['Credits'],
-                    'points': player['predicted_points'] if 'predicted_points' in team_squads.columns else player['Credits'] * 10
-                }
-            
-            # Create problem dictionary for solve_optimization_problem
+                    'credits': float(player['Credits']),
+                    'points': float(player['predicted_points'])
+                 }
+
+            if not players_dict:
+                logger.error("No valid players available for optimization after processing.")
+                st.error("No valid players found for team selection. Check data quality.")
+                return None
+
             problem = {
                 'players': players_dict,
                 'role_requirements': role_requirements,
                 'max_credits': 100,
-                'max_players': 7
+                'team_ratio_limit': 7
             }
-            
-            # Create DataFrame for greedy selection if needed
-            team_squads_copy = team_squads.copy()
-            if 'predicted_points' not in team_squads_copy.columns:
-                team_squads_copy['predicted_points'] = team_squads_copy['Credits'] * 10
-            
-            # Select team
+
+            selected_team_result = None
+            logger.info("Attempting team optimization...")
             try:
-                selected_team_obj = optimizer.solve_optimization_problem(problem)
-                if selected_team_obj is None and verbose:
-                    print("Failed to select team using optimization. Trying fallback method.")
-                    selected_team_obj = optimizer._greedy_team_selection(team_squads_copy, home_team, away_team, role_requirements)
+                if not self.optimizer:
+                     logger.error("TeamOptimizer not initialized.")
+                     raise ValueError("Optimizer not available.")
+                selected_team_result = self.optimizer.solve_optimization_problem(problem)
+                if selected_team_result is None or not selected_team_result.get('selected_players'):
+                     logger.warning("Optimization failed or returned empty team. Trying greedy fallback.")
+                     selected_team_result = self._fallback_greedy_selection(team_squads, role_requirements)
+                     if selected_team_result is None:
+                          logger.error("Greedy fallback also failed.")
+                          st.error("Both optimization and fallback methods failed to select a team.")
+                          return None
+                     else:
+                          logger.info("Greedy fallback selection successful.")
+                else:
+                     logger.info("Optimization successful.")
             except Exception as e:
-                if verbose:
-                    print(f"Error selecting team: {str(e)}")
-                    print("Trying fallback greedy selection method.")
-                selected_team_obj = optimizer._greedy_team_selection(team_squads_copy, home_team, away_team, role_requirements)
-            
-            if selected_team_obj is None:
-                if verbose:
-                    print("Failed to select team.")
-                return None
-            
-            # Ensure selected_team is in the expected dictionary format
-            if isinstance(selected_team_obj, list):
-                # Convert from list to dictionary format
-                selected_team = {
-                    'selected_players': selected_team_obj,
-                    'total_credits': sum(player.get('credits', 0) for player in selected_team_obj),
-                    'total_points': sum(player.get('points', 0) for player in selected_team_obj),
-                    'captain': selected_team_obj[0].get('name', '') if selected_team_obj else '',
-                    'vice_captain': selected_team_obj[1].get('name', '') if len(selected_team_obj) > 1 else ''
-                }
+                logger.error(f"Error during team optimization: {e}", exc_info=True)
+                st.error(f"Optimization error: {e}. Trying greedy fallback.")
+                selected_team_result = self._fallback_greedy_selection(team_squads, role_requirements)
+                if selected_team_result is None:
+                     logger.error("Greedy fallback failed after optimization error.")
+                     st.error("Both optimization and fallback methods failed to select a team.")
+                     return None
+                else:
+                     logger.info("Greedy fallback successful after optimization error.")
+
+            if selected_team_result is None:
+                 logger.critical("Selected team result is None after all attempts.")
+                 return None
+
+            # 7. Post-processing: Finalize Captain/Vice-Captain
+            captain, vice_captain = None, None
+            if self.model_integrator and hasattr(self.model_integrator, 'get_captain_vice_captain'):
+                try:
+                    selected_players_list_for_cvc = selected_team_result.get('selected_players', [])
+                    if selected_players_list_for_cvc:
+                         captain, vice_captain = self.model_integrator.get_captain_vice_captain(selected_players_list_for_cvc, pitch_type)
+                         if captain and vice_captain:
+                              logger.info(f"Integrator suggested C: {captain}, VC: {vice_captain}")
+                         else:
+                              logger.warning("Integrator did not return valid C/VC suggestions.")
+                    else:
+                        logger.warning("No selected players to pass for C/VC suggestion.")
+                except Exception as e:
+                     logger.warning(f"Could not get C/VC suggestions from integrator: {e}")
+                     captain, vice_captain = None, None
+
+            if 'selected_players' in selected_team_result and selected_team_result['selected_players']:
+                 player_list = sorted(selected_team_result['selected_players'], key=lambda p: p.get('points', 0), reverse=True)
+                 final_captain = captain if captain else (player_list[0].get('name', '') if player_list else '')
+                 fallback_vc = player_list[1].get('name', '') if len(player_list) > 1 else final_captain
+                 final_vice_captain = vice_captain if vice_captain and vice_captain != final_captain else fallback_vc
+                 if final_vice_captain == final_captain and len(player_list) > 1:
+                      final_vice_captain = player_list[1].get('name', '')
+                 elif final_vice_captain == final_captain:
+                      final_vice_captain = 'N/A'
+                 selected_team_result['captain'] = final_captain
+                 selected_team_result['vice_captain'] = final_vice_captain
+                 logger.info(f"Final Captain: {selected_team_result['captain']}, Vice-Captain: {selected_team_result['vice_captain']}")
             else:
-                selected_team = selected_team_obj
-                
-                # Ensure captain and vice-captain are properly set
-                if 'players' in selected_team and selected_team['players'] and len(selected_team['players']) > 1:
-                    # Extract captain and vice-captain from role field if they exist
-                    for player in selected_team['players']:
-                        role = player.get('role', '')
-                        if isinstance(role, str) and '(C)' in role:
-                            selected_team['captain'] = player.get('name', player.get('Player Name', ''))
-                        elif isinstance(role, str) and '(VC)' in role:
-                            selected_team['vice_captain'] = player.get('name', player.get('Player Name', ''))
-                    
-                    # If not found, use first and second players
-                    if 'captain' not in selected_team:
-                        selected_team['captain'] = selected_team['players'][0].get('name', 
-                                                selected_team['players'][0].get('Player Name', ''))
-                    if 'vice_captain' not in selected_team:
-                        selected_team['vice_captain'] = selected_team['players'][1].get('name', 
-                                                    selected_team['players'][1].get('Player Name', ''))
-            
-            # Print team details
-            if verbose:
-                print("\nSelected Dream11 Team:")
-                print(f"Total Credits: {selected_team.get('total_credits', 0)}")
-                print(f"Captain: {selected_team.get('captain', 'None')}")
-                print(f"Vice Captain: {selected_team.get('vice_captain', 'None')}")
-                
-                # Print team distribution
-                team_distribution = {}
-                for player in selected_team.get('selected_players', []):
-                    team = player.get('team', '')
-                    team_distribution[team] = team_distribution.get(team, 0) + 1
-                print("\nTeam Distribution:")
-                for team, count in team_distribution.items():
-                    print(f"{team}: {count} players")
-                
-                # Print players by role
-                players_by_role = {}
-                for player in selected_team.get('selected_players', []):
-                    # Get standardized role
-                    player_role = player.get('role', '')
-                    if not player_role:
-                        player_role = player.get('Player Type', '')
-                    role = self.standardize_role(player_role)
-                    
-                    # Add to role dictionary
-                    if role not in players_by_role:
-                        players_by_role[role] = []
-                    players_by_role[role].append(player)
-                
-                print("\nSelected Players by Role:")
-                for role in ['WK', 'BAT', 'AR', 'BOWL']:
-                    if role in players_by_role:
-                        print(f"\n{role}:")
-                        for player in players_by_role[role]:
-                            captain_marker = " (C)" if player.get('name', '') == selected_team.get('captain', '') else ""
-                            vc_marker = " (VC)" if player.get('name', '') == selected_team.get('vice_captain', '') else ""
-                            print(f"- {player.get('name', '')}{captain_marker}{vc_marker} ({player.get('team', '')}): {player.get('points', 0):.2f} pts, {player.get('credits', 0)} cr")
-            
-            # Try to select impact players
-            try:
-                # Convert the selected players to DataFrame format for the impact players selection
-                selected_players_df = pd.DataFrame([
-                    {
-                        'Player Name': player.get('name', ''),
-                        'Team': player.get('team', ''),
-                        'Role': player.get('role', ''),
-                        'Credits': player.get('credits', 0),
-                        'predicted_points': player.get('points', 0)
-                    }
-                    for player in selected_team.get('selected_players', [])
-                ])
-                
-                # Convert all players to DataFrame format
-                all_players_df = team_squads.copy()
-                
-                # Select impact players using the optimizer
-                impact_players = []
-                if hasattr(optimizer, '_select_impact_players_fallback'):
-                    try:
-                        impact_players_df = optimizer._select_impact_players_fallback(
-                            all_players_df, 
-                            selected_players_df, 
-                            num_substitutes=4
-                        )
-                        
-                        # Convert DataFrame to list of dictionaries if it's a DataFrame
-                        if isinstance(impact_players_df, pd.DataFrame) and not impact_players_df.empty:
-                            impact_players = impact_players_df.to_dict('records')
-                        
-                        selected_team['impact_players'] = impact_players
-                    except Exception as e:
-                        if verbose:
-                            print(f"Error in impact players fallback: {str(e)}")
-                            traceback.print_exc()
-                        impact_players = []
-                        
-                    if verbose and impact_players:
-                        print("\nImpact Substitutes:")
-                        for player in impact_players:
-                            player_name = player.get('name', player.get('Player Name', ''))
-                            player_team = player.get('team', player.get('Team', ''))
-                            player_role = player.get('role', player.get('Role', ''))
-                            player_points = player.get('predicted_points', player.get('points', 0))
-                            player_credits = player.get('credits', player.get('Credits', 0))
-                            
-                            print(f"- {player_name} ({player_team}, {player_role}): {player_points:.2f} pts, {player_credits} cr")
-            except Exception as e:
-                if verbose:
-                    print(f"Error selecting impact players: {str(e)}")
-                    traceback.print_exc()
-                selected_team['impact_players'] = []
-            
-            return selected_team
-            
+                 selected_team_result['captain'] = 'N/A'
+                 selected_team_result['vice_captain'] = 'N/A'
+
+            # 8. Select Impact Players
+            selected_player_names = {p['name'] for p in selected_team_result.get('selected_players', [])}
+            available_for_impact = team_squads[~team_squads['Player Name'].isin(selected_player_names)].copy()
+
+            impact_players = []
+            if not available_for_impact.empty:
+                logger.info(f"Selecting impact players from {len(available_for_impact)} available candidates.")
+                try:
+                    if hasattr(self.optimizer, 'select_impact_players'):
+                         impact_players = self.optimizer.select_impact_players(available_for_impact)
+                         selected_team_result['impact_players'] = impact_players if impact_players is not None else []
+                         logger.info(f"Selected {len(selected_team_result['impact_players'])} impact players.")
+                    else:
+                         logger.warning("Optimizer object missing 'select_impact_players' method.")
+                         selected_team_result['impact_players'] = []
+                except Exception as e:
+                    logger.error(f"Error selecting impact players: {e}", exc_info=True)
+                    st.warning(f"Could not select impact players due to an error: {e}")
+                    selected_team_result['impact_players'] = []
+            else:
+                 logger.warning("No players available for impact player selection.")
+                 selected_team_result['impact_players'] = []
+
+            # 9. Return the final result dictionary
+            logger.info("predict_team function completed successfully.")
+            return selected_team_result
+
         except Exception as e:
-            if verbose:
-                print(f"Error predicting team: {str(e)}")
-                traceback.print_exc()
+            logger.error(f"Critical error in predict_team: {str(e)}", exc_info=True)
+            st.error(f"An unexpected error occurred during team prediction: {str(e)}")
             return None
-    
+
+    def _fallback_greedy_selection(self, player_df, role_requirements):
+        """Simple greedy selection based on predicted points as a fallback."""
+        logger.info("Using fallback greedy team selection.")
+        try:
+            # Ensure points are numeric and sort
+            player_df['predicted_points'] = pd.to_numeric(player_df['predicted_points'], errors='coerce').fillna(0)
+            player_df['Credits'] = pd.to_numeric(player_df['Credits'], errors='coerce').fillna(8.0) # Ensure credits are numeric
+
+            sorted_players = player_df.sort_values('predicted_points', ascending=False).to_dict('records')
+
+            selected_players = []
+            current_credits = 0
+            team_counts = {}
+            role_counts = {role: 0 for role in ['WK', 'BAT', 'AR', 'BOWL']}
+            max_credits = 100
+            max_players_from_team = 7
+
+            for player in sorted_players:
+                if len(selected_players) == 11:
+                    break
+
+                player_role = player.get('Role')
+                player_team = player.get('Team')
+                player_credits = player.get('Credits')
+                player_name = player.get('Player Name')
+
+                # Basic checks
+                if not all([player_name, player_role, player_team, isinstance(player_credits, (int, float))]):
+                    logger.warning(f"Skipping player in greedy fallback due to missing data: {player_name}")
+                    continue
+                player_credits = float(player_credits)
+
+                # Check credits
+                if current_credits + player_credits > max_credits:
+                    continue
+
+                # Check team limits
+                if team_counts.get(player_team, 0) >= max_players_from_team:
+                    continue
+
+                # Check role counts (consider max limits)
+                role_max = role_requirements.get(player_role, (0, 11))[1]
+                if role_counts.get(player_role, 0) >= role_max:
+                    continue
+
+                # Add player
+                selected_players.append({
+                    'name': player_name,
+                    'team': player_team,
+                    'role': player_role,
+                    'credits': player_credits,
+                    'points': player['predicted_points']
+                })
+                current_credits += player_credits
+                team_counts[player_team] = team_counts.get(player_team, 0) + 1
+                role_counts[player_role] = role_counts.get(player_role, 0) + 1
+
+            # Final check for minimum role requirements
+            final_role_counts = {role: 0 for role in ['WK', 'BAT', 'AR', 'BOWL']}
+            for p in selected_players:
+                final_role_counts[p['role']] = final_role_counts.get(p['role'], 0) + 1
+
+            valid_team = True
+            if len(selected_players) != 11:
+                logger.error(f"Greedy fallback only selected {len(selected_players)} players.")
+                valid_team = False
+
+            for role, (min_req, _) in role_requirements.items():
+                if final_role_counts.get(role, 0) < min_req:
+                    logger.warning(f"Greedy fallback failed minimum role requirement for {role}: Needed {min_req}, Got {final_role_counts.get(role, 0)}")
+                    valid_team = False
+                    # Don't break, report all unmet requirements
+
+            if not valid_team:
+                logger.error("Greedy fallback failed to form a valid 11-player team meeting all requirements.")
+                st.warning("Greedy fallback could not meet all team constraints. Results may be incomplete.")
+                # Return the partial team anyway, maybe better than nothing?
+                # return None # Or return partial result
+
+            # Construct result dictionary
+            total_points = sum(p['points'] for p in selected_players)
+            captain = selected_players[0]['name'] if selected_players else 'N/A'
+            vice_captain = selected_players[1]['name'] if len(selected_players) > 1 else captain
+            if captain == vice_captain and len(selected_players) > 1:
+                vice_captain = selected_players[1]['name'] # Ensure different if possible
+            elif captain == vice_captain:
+                vice_captain = 'N/A'
+
+            logger.info(f"Greedy fallback selection completed. Valid: {valid_team}")
+            return {
+                'selected_players': selected_players,
+                'total_credits': current_credits,
+                'total_points': total_points,
+                'captain': captain,
+                'vice_captain': vice_captain,
+                'team_distribution': team_counts,
+                'role_distribution': final_role_counts,
+                'impact_players': [] # Greedy doesn't select impact players
+            }
+        except Exception as e:
+            logger.error(f"Error in fallback greedy selection: {e}", exc_info=True)
+            return None
+
     def plot_team_composition(self, team):
         """Create a visualization of team composition by role
         
         Args:
-            team (list or dict): List of player dictionaries or team object
+            team (list): List of player dictionaries
             
         Returns:
             matplotlib.figure.Figure: The generated figure
@@ -959,47 +1091,14 @@ class Dream11App:
             # Create figure
             fig, ax = plt.subplots(figsize=(8, 6))
             
-            # Extract players list from team if it's a dictionary with 'selected_players' key
-            if isinstance(team, dict) and 'selected_players' in team:
-                players = team['selected_players']
-            elif isinstance(team, dict) and 'players' in team:
-                players = team['players']
-            elif isinstance(team, list):
-                players = team
-            elif isinstance(team, pd.DataFrame):
-                players = team.to_dict('records')
-            else:
-                # Handle unexpected type
-                print(f"Unexpected team type: {type(team)}")
-                players = []
-                if isinstance(team, str):
-                    print(f"Received string instead of team object: {team}")
-                    raise TypeError("Expected team object but received string")
-            
             # Count number of players by role
             role_counts = {}
-            for player in players:
-                if not isinstance(player, dict):
-                    continue
-                    
-                role = None
-                # Try different possible keys for role
-                if 'role' in player:
-                    role = player['role']
-                elif 'Player Type' in player:
-                    role = player['Player Type']
-                elif 'player_type' in player:
-                    role = player['player_type']
-                    
-                if role:
-                    role = self.standardize_role(role)
-                    role_counts[role] = role_counts.get(role, 0) + 1
-            
-            # If no roles found, return empty chart
-            if not role_counts:
-                ax.text(0.5, 0.5, "No role data available", ha='center', va='center')
-                ax.axis('off')
-                return fig
+            for player in team:
+                role = self.standardize_role(player.get('role', player.get('Player Type', '')))
+                if role in role_counts:
+                    role_counts[role] += 1
+                else:
+                    role_counts[role] = 1
             
             # Set colors for different roles
             colors = {
@@ -1033,14 +1132,13 @@ class Dream11App:
             fig, ax = plt.subplots()
             ax.text(0.5, 0.5, f"Error plotting team composition: {str(e)}", 
                     ha='center', va='center', wrap=True)
-            ax.axis('off')
             return fig
-    
+        
     def plot_player_points(self, team):
         """Create a visualization of predicted points by player
         
         Args:
-            team (list or dict): List of player dictionaries or team object
+            team (list): List of player dictionaries
             
         Returns:
             matplotlib.figure.Figure: The generated figure
@@ -1049,77 +1147,23 @@ class Dream11App:
             # Create figure
             fig, ax = plt.subplots(figsize=(10, 6))
             
-            # Extract players list from team if it's a dictionary with 'selected_players' key
-            if isinstance(team, dict) and 'selected_players' in team:
-                players = team['selected_players']
-            elif isinstance(team, dict) and 'players' in team:
-                players = team['players']
-            elif isinstance(team, list):
-                players = team
-            elif isinstance(team, pd.DataFrame):
-                players = team.to_dict('records')
-            else:
-                # Handle unexpected type
-                print(f"Unexpected team type: {type(team)}")
-                players = []
-                if isinstance(team, str):
-                    print(f"Received string instead of team object: {team}")
-                    raise TypeError("Expected team object but received string")
-            
             # Extract player names and points
-            player_data = []
-            for player in players:
-                if not isinstance(player, dict):
-                    continue
-                    
-                # Try different possible keys for player name and points
-                name = None
-                if 'player' in player:
-                    name = player['player']
-                elif 'name' in player:
-                    name = player['name']
-                elif 'Player Name' in player:
-                    name = player['Player Name']
-                
-                points = None
-                if 'predicted_points' in player:
-                    points = player['predicted_points']
-                elif 'fantasy_points' in player:
-                    points = player['fantasy_points']
-                elif 'points' in player:
-                    points = player['points']
-                
-                role = None
-                if 'role' in player:
-                    role = player['role']
-                elif 'Player Type' in player:
-                    role = player['Player Type']
-                elif 'player_type' in player:
-                    role = player['player_type']
-                
-                if name and points is not None:
-                    player_data.append({
-                        'name': name,
-                        'points': points,
-                        'role': role
-                    })
-            
-            # If no players found, return empty chart
-            if not player_data:
-                ax.text(0.5, 0.5, "No player points data available", ha='center', va='center')
-                ax.axis('off')
-                return fig
+            players = []
+            points = []
+            for player in team:
+                name = player.get('player', player.get('Player Name', ''))
+                point = player.get('predicted_points', 0)
+                if name:
+                    players.append(name)
+                    points.append(point)
             
             # Sort by points
-            player_data.sort(key=lambda x: x['points'], reverse=True)
-            
-            # Get sorted data
-            names = [p['name'] for p in player_data]
-            points = [p['points'] for p in player_data]
-            roles = [self.standardize_role(p['role']) if p['role'] else 'Unknown' for p in player_data]
+            sorted_indices = np.argsort(points)[::-1]  # Descending order
+            sorted_players = [players[i] for i in sorted_indices]
+            sorted_points = [points[i] for i in sorted_indices]
             
             # Create horizontal bar chart
-            bars = ax.barh(names, points, height=0.6)
+            bars = ax.barh(sorted_players, sorted_points, height=0.6)
             
             # Color bars based on role if available
             role_colors = {
@@ -1129,12 +1173,13 @@ class Dream11App:
                 'BOWL': '#e74c3c'  # Red
             }
             
-            for i, role in enumerate(roles):
+            for i, player in enumerate(sorted_indices):
+                role = self.standardize_role(team[player].get('role', team[player].get('Player Type', '')))
                 bars[i].set_color(role_colors.get(role, '#95a5a6'))
             
             # Add data labels
-            for i, point in enumerate(points):
-                ax.text(point + max(points) * 0.02, i, f'{point:.1f}', va='center')
+            for i, point in enumerate(sorted_points):
+                ax.text(point + max(sorted_points) * 0.02, i, f'{point:.1f}', va='center')
             
             # Add labels and title
             ax.set_xlabel('Predicted Points')
@@ -1153,7 +1198,6 @@ class Dream11App:
             fig, ax = plt.subplots()
             ax.text(0.5, 0.5, f"Error plotting player points: {str(e)}", 
                     ha='center', va='center', wrap=True)
-            ax.axis('off')
             return fig
         
     def plot_team_points(self, team, predicted_points=None):
@@ -1330,631 +1374,235 @@ class Dream11App:
         """Standardize player role to one of: WK, BAT, AR, BOWL."""
         return self.role_mapper.standardize_role(role)
         
-    def run(self):
-        """Run the Streamlit app"""
-        try:
-            # Set dark theme for Streamlit
-            st.set_page_config(
-                page_title="Dream11 IPL Team Predictor",
-                page_icon="🏏",
-                layout="wide",
-                initial_sidebar_state="expanded"
-            )
-            
-            # Apply dark theme customization
-            st.markdown("""
-                <style>
-                .stApp {
-                    background-color: #121212;
-                    color: #ffffff;
-                }
-                </style>
-            """, unsafe_allow_html=True)
-            
-            # Apply custom styling
-            st.markdown("""
-                <style>
-                .main-header {
-                    font-size: 2.5rem;
-                    color: #3498db;
-                    text-align: center;
-                    margin-bottom: 1rem;
-                    font-weight: bold;
-                }
-                .sub-header {
-                    font-size: 1.8rem;
-                    color: #2ecc71;
-                    margin-top: 1.5rem;
-                    margin-bottom: 1rem;
-                    font-weight: bold;
-                }
-                .team-header {
-                    font-size: 1.5rem;
-                    color: #e74c3c;
-                    margin-top: 1rem;
-                    font-weight: bold;
-                }
-                .highlight {
-                    background-color: #f39c12;
-                    padding: 0.2rem;
-                    border-radius: 0.2rem;
-                }
-                .captain {
-                    color: #e74c3c;
-                    font-weight: bold;
-                }
-                .vice-captain {
-                    color: #9b59b6;
-                    font-weight: bold;
-                }
-                .role-wk {
-                    color: #3498db;
-                    font-weight: bold;
-                }
-                .role-bat {
-                    color: #2ecc71;
-                    font-weight: bold;
-                }
-                .role-ar {
-                    color: #f39c12;
-                    font-weight: bold;
-                }
-                .role-bowl {
-                    color: #e74c3c;
-                    font-weight: bold;
-                }
-                .team-box {
-                    background-color: #2c3e50;
-                    color: #ecf0f1;
-                    padding: 1.5rem;
-                    border-radius: 0.5rem;
-                    box-shadow: 0 2px 5px rgba(0,0,0,0.3);
-                    margin-bottom: 1.5rem;
-                }
-                .info-box {
-                    background-color: #34495e;
-                    color: #ecf0f1;
-                    padding: 1rem;
-                    border-radius: 0.5rem;
-                    border-left: 5px solid #3498db;
-                    margin-bottom: 1rem;
-                }
-                .warning-box {
-                    background-color: #34495e;
-                    color: #ecf0f1;
-                    padding: 1rem;
-                    border-radius: 0.5rem;
-                    border-left: 5px solid #f39c12;
-                    margin-bottom: 1rem;
-                }
-                .stat-card {
-                    background-color: #34495e;
-                    color: #ecf0f1;
-                    padding: 1rem;
-                    border-radius: 0.5rem;
-                    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-                    text-align: center;
-                }
-                .impact-player {
-                    background-color: #2c3e50;
-                    color: #ecf0f1;
-                    padding: 10px;
-                    border-radius: 5px;
-                    margin-bottom: 10px;
-                }
-                .player-name {
-                    font-weight: bold;
-                    color: #3498db;
-                }
-                .player-details {
-                    font-size: 0.9em;
-                    color: #bdc3c7;
-                }
-                /* Dark themed player card */
-                .player-card {
-                    background-color: #34495e;
-                    color: #ecf0f1;
-                    padding: 0.8rem;
-                    border-radius: 0.4rem;
-                    margin-bottom: 0.8rem;
-                    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
-                    text-align: center;
-                }
-                </style>
-            """, unsafe_allow_html=True)
-            
-            # Header
-            st.markdown("<h1 class='main-header'>Dream11 IPL Team Predictor 🏏</h1>", unsafe_allow_html=True)
-            
-            # Sidebar for inputs
-            with st.sidebar:
-                st.markdown("<h3 style='text-align: center;'>Match Settings</h3>", unsafe_allow_html=True)
-                
-                # Create columns for team selection
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    team1 = st.selectbox("Team 1:", 
-                                        ["CSK", "MI", "RCB", "KKR", "PBKS", "DC", "SRH", "RR", "GT", "LSG"])
-                    
-                with col2:
-                    team2 = st.selectbox("Team 2:", 
-                                        ["MI", "CSK", "RCB", "KKR", "PBKS", "DC", "SRH", "RR", "GT", "LSG"],
-                                        index=1)
-                
-                st.markdown("<hr>", unsafe_allow_html=True)
-                st.markdown("<h3 style='text-align: center;'>Match Conditions</h3>", unsafe_allow_html=True)
-                
-                venue = st.selectbox("Venue:", self.venues)
-                match_type = st.selectbox("Match Type:", self.match_types)
-                pitch_type = st.radio("Pitch Type:", ["balanced", "batting_friendly", "bowling_friendly"], 
-                                   format_func=lambda x: x.replace('_', ' ').title())
-                
-                st.markdown("<hr>", unsafe_allow_html=True)
-                st.markdown("<h3 style='text-align: center;'>Advanced Settings</h3>", unsafe_allow_html=True)
-                
-                # Advanced settings in expander
-                with st.expander("Model Settings"):
-                    random_factor = st.slider("Randomness Factor:", 0.0, 1.0, 0.2, 0.05,
-                                             help="Higher values introduce more variety in team selection")
-                    
-                    use_custom_boost = st.checkbox("Use Custom Player Boost", 
-                                                 help="Boost certain players manually")
-                    
-                    if use_custom_boost:
-                        custom_boost_player = st.text_input("Player Name to Boost:")
-                        custom_boost_factor = st.slider("Boost Factor:", 1.0, 2.0, 1.3, 0.1)
-                
-                # Add information box about the model
-                st.markdown("""
-                <div class='info-box'>
-                This predictor uses machine learning models trained on historical IPL data 
-                to predict player performance and optimize team selection within Dream11 constraints.
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Prediction button with a more attractive style
-                predict_button = st.button("🔮 Predict Dream11 Team", 
-                                          type="primary", 
-                                          use_container_width=True)
-            
-            # Load data on app startup
-            if not hasattr(self, 'data_loaded') or not self.data_loaded:
-                with st.spinner("Loading and preprocessing data..."):
-                    self.load_data()
-                
-                with st.spinner("Training prediction models..."):
-                    self.train_models()
-                    # Train with 2025 data if available
-                    self.train_models_with_2025_data()
-                    
-                self.data_loaded = True
-            
-            # Main content area
-            if predict_button:
-                with st.spinner("Predicting the optimal Dream11 team..."):
-                    try:
-                        # Call the predict_team method
-                        result = self.predict_team(
-                            team1, team2, venue, match_type, pitch_type
-                        )
-                        
-                        if result is not None:
-                            selected_team = result
-                            captain = result.get('captain', '')
-                            vice_captain = result.get('vice_captain', '')
-                            
-                            # Create a dictionary of player points
-                            predicted_points = {}
-                            for player in selected_team.get('selected_players', []):
-                                player_name = player.get('name', player.get('Player Name', ''))
-                                if player_name:
-                                    predicted_points[player_name] = player.get('points', player.get('predicted_points', 0))
-                            
-                            if selected_team is None or len(selected_team.get('selected_players', [])) < 11:
-                                st.error("🚫 Could not select a valid team with the given constraints. Please try different teams.")
-                            else:
-                                # Success message
-                                st.markdown("""
-                                <div class='info-box'>
-                                ✅ Team prediction completed successfully! Here's your optimal Dream11 team.
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                # Create 3 columns for stats
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.markdown("""
-                                    <div class='stat-card'>
-                                    <h4>Total Predicted Points</h4>
-                                    <h2>{:.2f}</h2>
-                                    </div>
-                                    """.format(sum(predicted_points.values())), unsafe_allow_html=True)
-                                
-                                with col2:
-                                    # Calculate team distribution
-                                    team_counts = {}
-                                    for player in selected_team.get("selected_players", []):
-                                        # Use 'Team' if 'team' is not available
-                                        team_key = player.get('team', player.get('Team', 'Unknown'))
-                                        if team_key in team_counts:
-                                            team_counts[team_key] += 1
-                                        else:
-                                            team_counts[team_key] = 1
-                                    
-                                    team_distribution = ", ".join([f"{team}: {count}" for team, count in team_counts.items()])
-                                    st.markdown(f"""
-                                    <div class='stat-card'>
-                                    <h4>Team Distribution</h4>
-                                    <h3>{team_distribution}</h3>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                
-                                with col3:
-                                    # Calculate role distribution
-                                    role_counts = {}
-                                    for player in selected_team.get("selected_players", []):
-                                        role = self.standardize_role(player.get('role', player.get('Player Type', '')))
-                                        if role in role_counts:
-                                            role_counts[role] += 1
-                                        else:
-                                            role_counts[role] = 1
-                                    
-                                    role_distribution = ", ".join([f"{role}: {count}" for role, count in role_counts.items()])
-                                    st.markdown(f"""
-                                    <div class='stat-card'>
-                                    <h4>Role Distribution</h4>
-                                    <h3>{role_distribution}</h3>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                
-                                # Display team in a nice layout
-                                st.markdown("<h2 class='sub-header'>Predicted Dream11 Team</h2>", unsafe_allow_html=True)
-                                
-                                with st.container():
-                                    st.markdown("<div class='team-box'>", unsafe_allow_html=True)
-                                    
-                                    # Display captain and vice-captain
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        st.markdown(f"""
-                                        <div style='text-align: center;'>
-                                        <h3>Captain (2x) 👑</h3>
-                                        <h2 class='captain'>{captain}</h2>
-                                        <p>Predicted Points: {predicted_points.get(captain, 0)*2:.2f}</p>
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                                    
-                                    with col2:
-                                        st.markdown(f"""
-                                        <div style='text-align: center;'>
-                                        <h3>Vice-Captain (1.5x) 🥈</h3>
-                                        <h2 class='vice-captain'>{vice_captain}</h2>
-                                        <p>Predicted Points: {predicted_points.get(vice_captain, 0)*1.5:.2f}</p>
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                                    
-                                    st.markdown("<hr>", unsafe_allow_html=True)
-                                    
-                                    # Group players by role for display
-                                    players_by_role = {}
-                                    for player in selected_team.get('selected_players', []):
-                                        # Get standardized role
-                                        player_role = player.get('role', '')
-                                        if not player_role:
-                                            player_role = player.get('Player Type', '')
-                                        role = self.standardize_role(player_role)
-                                        
-                                        # Add to role dictionary
-                                        if role not in players_by_role:
-                                            players_by_role[role] = []
-                                        players_by_role[role].append(player)
-                                    
-                                    # Display players by role
-                                    role_order = ['WK', 'BAT', 'AR', 'BOWL']
-                                    role_icons = {
-                                        'WK': '🧤', 
-                                        'BAT': '🏏', 
-                                        'AR': '⚔️', 
-                                        'BOWL': '🎯'
-                                    }
-                                    role_classes = {
-                                        'WK': 'role-wk',
-                                        'BAT': 'role-bat',
-                                        'AR': 'role-ar',
-                                        'BOWL': 'role-bowl'
-                                    }
-                                    
-                                    for role in role_order:
-                                        if role in players_by_role and len(players_by_role[role]) > 0:
-                                            st.markdown(f"<h3 class='team-header'>{role_icons.get(role, '')} {role} ({len(players_by_role[role])})</h3>", unsafe_allow_html=True)
-                                            
-                                            # Create a grid for players
-                                            cols = st.columns(min(4, len(players_by_role[role])))
-                                            for i, player in enumerate(players_by_role[role]):
-                                                # Try multiple possible player name keys
-                                                player_name = None
-                                                for name_key in ['player', 'name', 'Player Name']:
-                                                    if name_key in player and player[name_key]:
-                                                        player_name = player[name_key]
-                                                        break
-                                                if not player_name:
-                                                    player_name = 'Unknown'
-                                                
-                                                # Try multiple possible team keys
-                                                player_team = None
-                                                for team_key in ['team', 'Team']:
-                                                    if team_key in player and player[team_key]:
-                                                        player_team = player[team_key]
-                                                        break
-                                                if not player_team:
-                                                    player_team = 'Unknown'
-                                                
-                                                player_points = predicted_points.get(player_name, 0)
-                                                
-                                                # Try multiple possible credits keys
-                                                player_credits = None
-                                                for credits_key in ['credits', 'Credits']:
-                                                    if credits_key in player and player[credits_key]:
-                                                        player_credits = player[credits_key]
-                                                        break
-                                                if not player_credits:
-                                                    player_credits = 0
-                                                
-                                                # Highlight captain and vice-captain
-                                                if '(C)' in player.get('role', ''):
-                                                    player_name = f"{player_name} (C)"
-                                                    name_class = "captain"
-                                                elif '(VC)' in player.get('role', ''):
-                                                    player_name = f"{player_name} (VC)"
-                                                    name_class = "vice-captain"
-                                                else:
-                                                    name_class = role_classes.get(role, "")
-                                                
-                                                with cols[i % len(cols)]:
-                                                    st.markdown(f"""
-                                                    <div class="player-card">
-                                                    <h4 class="{name_class}">{player_name}</h4>
-                                                    <p>{player_team} | {player_points:.2f} pts</p>
-                                                    <small>Credits: {player_credits}</small>
-                                                    </div>
-                                                    """, unsafe_allow_html=True)
-                                    
-                                    st.markdown("</div>", unsafe_allow_html=True)
-                                
-                                # Show selected_team as JSON in expandable section (for debugging)
-                                with st.expander("View Team Details"):
-                                    st.write(selected_team)
-                                
-                                # Display team composition and player points visualization
-                                st.markdown("<h2 class='sub-header'>Team Analysis</h2>", unsafe_allow_html=True)
-                                col1, col2 = st.columns(2)
-                                
-                                with col1:
-                                    st.markdown("<h3>Team Composition by Role</h3>", unsafe_allow_html=True)
-                                    fig_composition = self.plot_team_composition(selected_team)
-                                    st.pyplot(fig_composition)
-                                
-                                with col2:
-                                    st.markdown("<h3>Predicted Player Points</h3>", unsafe_allow_html=True)
-                                    fig_points = self.plot_player_points(selected_team)
-                                    st.pyplot(fig_points)
-                                
-                                # Show impact substitute players
-                                if selected_team is not None and len(selected_team) > 0:
-                                    st.subheader("Impact Substitutes")
-                                    with st.spinner("Selecting impact substitutes..."):
-                                        try:
-                                            # Convert team to DataFrame if it's not already
-                                            if not isinstance(selected_team, pd.DataFrame):
-                                                # Extract just the selected_players list from the dictionary
-                                                selected_players = selected_team.get('selected_players', [])
-                                                if selected_players:
-                                                    team_df = pd.DataFrame(selected_players)
-                                                else:
-                                                    # Fallback if selected_players is empty
-                                                    st.warning("No selected players found for substitutes")
-                                                    team_df = pd.DataFrame()
-                                            else:
-                                                team_df = selected_team
-                                            
-                                            # Get all available players for this match
-                                            all_players = self.get_team_squads([team1, team2])
-                                            
-                                            # Manual implementation of impact player selection if optimizer method fails
-                                            try:
-                                                # First try the optimizer method
-                                                impact_players = self.optimizer.select_impact_players(
-                                                    all_players_df=all_players,
-                                                    selected_team_df=team_df,
-                                                    num_substitutes=4
-                                                )
-                                                
-                                                if impact_players is None or impact_players.empty:
-                                                    raise Exception("No impact players returned from optimizer")
-                                                    
-                                            except Exception as e:
-                                                st.warning(f"Using fallback method for impact players: {str(e)}")
-                                                # Fallback manual implementation if optimizer method fails
-                                                # Convert all_players to dict format if it's a DataFrame
-                                                if isinstance(all_players, pd.DataFrame):
-                                                    all_players_list = all_players.to_dict('records')
-                                                else:
-                                                    all_players_list = all_players
-                                                
-                                                # Convert selected_team to list of player names
-                                                selected_player_names = []
-                                                if isinstance(team_df, pd.DataFrame) and not team_df.empty:
-                                                    # Try different column names
-                                                    if 'player' in team_df.columns:
-                                                        selected_player_names = team_df['player'].tolist()
-                                                    elif 'name' in team_df.columns:
-                                                        selected_player_names = team_df['name'].tolist()
-                                                    elif 'Player Name' in team_df.columns:
-                                                        selected_player_names = team_df['Player Name'].tolist()
-                                                
-                                                # Filter out already selected players
-                                                available_players = []
-                                                for player in all_players_list:
-                                                    player_name = player.get('Player Name', player.get('name', ''))
-                                                    if player_name and player_name not in selected_player_names:
-                                                        available_players.append(player)
-                                                
-                                                # Sort available players by role
-                                                players_by_role = {
-                                                    'WK': [], 'BAT': [], 'AR': [], 'BOWL': []
-                                                }
-                                                
-                                                for player in available_players:
-                                                    role = self.standardize_role(player.get('Player Type', player.get('role', '')))
-                                                    if role in players_by_role:
-                                                        players_by_role[role].append(player)
-                                                
-                                                # Select one player from each role
-                                                impact_player_list = []
-                                                for role in ['WK', 'BAT', 'AR', 'BOWL']:
-                                                    if players_by_role[role]:
-                                                        # Sort by credits as a proxy for quality
-                                                        sorted_players = sorted(players_by_role[role], 
-                                                                              key=lambda x: float(x.get('Credits', 0)), 
-                                                                              reverse=True)
-                                                        if sorted_players:
-                                                            impact_player_list.append(sorted_players[0])
-                                                
-                                                # Create a DataFrame from the selected impact players
-                                                if impact_player_list:
-                                                    impact_players = pd.DataFrame(impact_player_list)
-                                                else:
-                                                    impact_players = pd.DataFrame()
-                                            
-                                            if impact_players is not None and not impact_players.empty:
-                                                # Create columns for displaying substitutes
-                                                cols = st.columns(4)
-                                                
-                                                # Display impact players
-                                                for i, (_, player) in enumerate(impact_players.iterrows()):
-                                                    with cols[i % 4]:
-                                                        # Try multiple possible name keys
-                                                        name = None
-                                                        for name_key in ['name', 'player', 'Player Name']:
-                                                            if name_key in player and player[name_key]:
-                                                                name = player[name_key]
-                                                                break
-                                                        if not name:
-                                                            name = 'Unknown Player'
-                                                        
-                                                        # Try multiple possible team keys
-                                                        team = None
-                                                        for team_key in ['team', 'Team']:
-                                                            if team_key in player and player[team_key]:
-                                                                team = player[team_key]
-                                                                break
-                                                        if not team:
-                                                            team = 'Unknown'
-                                                        
-                                                        # Try multiple possible role keys
-                                                        role = None
-                                                        for role_key in ['role', 'Player Type']:
-                                                            if role_key in player and player[role_key]:
-                                                                role = player[role_key]
-                                                                break
-                                                        if not role:
-                                                            role = 'Unknown Role'
-                                                        
-                                                        # Try multiple possible points keys
-                                                        points = 0
-                                                        for points_key in ['predicted_points', 'fantasy_points']:
-                                                            if points_key in player:
-                                                                points = player[points_key]
-                                                                break
-                                                        
-                                                        # Try multiple possible credits keys
-                                                        credits = 0
-                                                        for credits_key in ['credits', 'Credits']:
-                                                            if credits_key in player:
-                                                                credits = player[credits_key]
-                                                                break
-                                                
-                                                # Display the impact player with proper HTML
-                                                st.markdown(f"""
-                                                <div class="impact-player" style="background-color: #2c3e50; border-radius: 5px; padding: 10px; margin-bottom: 10px; color: white;">
-                                                    <div style="font-weight: bold; font-size: 1.1rem; margin-bottom: 5px;">{name}</div>
-                                                    <div>
-                                                        <span style="color: #7fbbda;">Team:</span> {team}<br>
-                                                        <span style="color: #7fbbda;">Role:</span> {role}<br>
-                                                        <span style="color: #7fbbda;">Points:</span> {points:.2f}<br>
-                                                        <span style="color: #7fbbda;">Credits:</span> {credits}
-                                                    </div>
-                                                </div>
-                                                """, unsafe_allow_html=True)
-                                                
-                                                # Add debugging info in an expandable section
-                                                with st.expander("Debug Impact Players Data", expanded=False):
-                                                    st.json(impact_players.to_dict(orient='records'))
-                                            else:
-                                                st.info("No suitable impact substitute players found")
-                                        except Exception as e:
-                                            st.error(f"Error selecting impact substitutes: {str(e)}")
-                                            st.exception(e)
-                    
-                    except Exception as e:
-                        st.error(f"Error predicting team: {str(e)}")
-                        import traceback
-                        st.exception(traceback.format_exc())
-            
+    def run_app(self):
+        st.set_page_config(layout="wide")
+        st.title("🏏 Dream11 Team Predictor App")
+        logger.info("Running Streamlit app UI...")
+
+        # Check if Model Integrator loaded
+        if not self.model_integrator:
+            st.error("🚨 Critical Error: Model Integrator failed to initialize. Model-based predictions are unavailable. Please check the logs.")
+            # Optionally provide more guidance or stop the app run here
+            # return # Uncomment to stop if models are essential
+
+        # --- Sidebar ---
+        st.sidebar.header("Match Details")
+
+        # Use dynamically loaded teams if available, else use default
+        team_list = self.available_teams if self.available_teams else ['CHE', 'DC', 'GT', 'KKR', 'LSG', 'MI', 'PBKS', 'RCB', 'RR', 'SRH']
+        if not team_list:
+             st.sidebar.error("No teams available. Check squad data.")
+             return
+
+        # Ensure unique teams can be selected
+        home_team = st.sidebar.selectbox("Select Home Team", team_list, index=0)
+
+        # Filter away team list to exclude home team
+        away_team_list = [t for t in team_list if t != home_team]
+        if not away_team_list and len(team_list) > 1: # Handle case where only one team might be left
+             away_team_list = [team_list[1]] # Just pick the second one
+        elif not away_team_list:
+             away_team_list = team_list # Fallback if only one team total
+
+        # Try to find a different default index for away team
+        away_team_default_index = 0
+        if away_team_list and len(away_team_list) > away_team_default_index:
+            pass # Index 0 is fine if list has elements
+        elif away_team_list: # If index 0 is out of bounds but list not empty
+             away_team_default_index = 0
+
+        if away_team_list: # Check if list is not empty
+             away_team = st.sidebar.selectbox("Select Away Team", away_team_list, index=away_team_default_index)
+        else:
+             st.sidebar.warning("Only one team available to select.")
+             away_team = home_team # Or handle differently
+
+        # Add Pitch Type Selector using types from ModelIntegrator
+        selected_pitch_type = st.sidebar.selectbox(
+            "Select Pitch Type",
+            options=self.pitch_types if hasattr(self, 'pitch_types') and self.pitch_types else ['balanced'], # Use options parameter and provide default
+            index=0, # Default to the first available pitch type
+            help="Select the expected pitch condition. This affects player point predictions."
+        )
+
+        venue = st.sidebar.selectbox("Select Venue (Optional)", [""] + self.venues)
+        match_type = st.sidebar.selectbox("Select Match Type (Optional)", [""] + self.match_types)
+
+        st.sidebar.header("Actions")
+        predict_button = st.sidebar.button("Predict Dream11 Team")
+        # train_button = st.sidebar.button("Train Models (Optional)") # Keep or remove as needed
+
+        # --- Main Area ---
+        st.header(f"Predicting Team for {home_team} vs {away_team}")
+        st.write(f"Pitch Type Selected: **{selected_pitch_type}**")
+        if venue:
+            st.write(f"Venue: {venue}")
+        if match_type:
+            st.write(f"Match Type: {match_type}")
+
+        if predict_button:
+            # Double-check integrator availability here before calling predict_team
+            if not self.model_integrator:
+                 st.error("Model Integrator is not available. Cannot generate predictions.")
+                 return # Stop prediction if models didn't load
+
+            if home_team == away_team:
+                 st.error("Home and Away teams must be different.")
+                 return
+
+            with st.spinner(f"Predicting team for {home_team} vs {away_team} on a {selected_pitch_type} pitch..."):
+                start_time = time.time()
+                # Pass the selected pitch type to predict_team
+                # Use verbose=False for cleaner UI output
+                result = self.predict_team(home_team, away_team, venue, match_type, selected_pitch_type, verbose=False)
+                end_time = time.time()
+                logger.info(f"Prediction process took {end_time - start_time:.2f} seconds.")
+                st.info(f"Prediction took {end_time - start_time:.2f} seconds.")
+
+                if result:
+                    # Call the new display method (to be implemented next)
+                    self.display_prediction_results(result)
+                else:
+                    st.error("Failed to predict team. Check logs or ensure squad data is available and valid for the selected teams.")
+
+        # --- Footer/Other Sections ---
+        st.sidebar.markdown("---")
+        st.sidebar.info("Dream11 Prediction Engine v2") # Updated footer
+
+    def _standardize_columns(self, df):
+        """Standardize column names to a consistent format."""
+        # Implement your standardization logic here
+        pass
+
+    def display_prediction_results(self, result):
+        """Displays the predicted team and impact players in Streamlit."""
+        st.subheader("🏆 Predicted Dream11 Team")
+
+        if not result or 'selected_players' not in result or not result['selected_players']:
+            st.warning("No team could be selected or prediction failed.")
+            return
+
+        # --- Team Summary ---
+        col1, col2, col3 = st.columns(3)
+        # Recalculate points/credits/distribution directly from selected_players for consistency
+        selected_players = result['selected_players']
+        total_points = sum(p.get('points', 0) for p in selected_players)
+        total_credits = sum(p.get('credits', 0) for p in selected_players)
+        team_counts = {}
+        for p in selected_players:
+            # Handle potential missing team info gracefully
+            team = p.get('team', 'Unknown')
+            team_counts[team] = team_counts.get(team, 0) + 1
+        team_dist_str = ", ".join([f"{t}: {c}" for t, c in sorted(team_counts.items())])
+
+        with col1:
+            st.metric("Total Predicted Points", f"{total_points:.2f}")
+        with col2:
+            st.metric("Total Credits Used", f"{total_credits:.1f} / 100")
+        with col3:
+            # Use markdown for better control over spacing/layout if needed
+             st.markdown(f"**Team Distribution:**\
+{team_dist_str}")
+
+        # Display Captain and Vice-Captain clearly
+        captain_name = result.get('captain', 'N/A')
+        vice_captain_name = result.get('vice_captain', 'N/A')
+        st.markdown(f"**Captain (C):** {captain_name}")
+        st.markdown(f"**Vice-Captain (VC):** {vice_captain_name}")
+        st.markdown("---")
+
+        # --- Player Display --- #
+        st.markdown("#### Selected Team Players")
+        players_by_role = {'WK': [], 'BAT': [], 'AR': [], 'BOWL': []}
+        role_mapping_display = {'WK':'Wicket Keepers', 'BAT':'Batters', 'AR':'All Rounders', 'BOWL':'Bowlers'}
+
+        for player in selected_players:
+            role = player.get('role', 'Unknown')
+            if role not in players_by_role:
+                 # Handle unexpected roles found during processing
+                 logger.warning(f"Unexpected player role '{role}' encountered in display for player {player.get('name')}")
+                 if 'Unknown' not in players_by_role: players_by_role['Unknown'] = []
+                 players_by_role['Unknown'].append(player)
             else:
-                # Welcome message when app first loads
-                st.markdown("""
-                <div class='info-box' style='text-align: center;'>
-                <h2>Welcome to the IPL Dream11 Team Predictor! 🏆</h2>
-                <p>This tool helps you select the optimal Dream11 team for IPL matches based on player performance data and advanced analytics.</p>
-                <p>To get started, select the match details in the sidebar and click "Predict Dream11 Team".</p>
-                </div>
-                
-                <div class='warning-box'>
-                <h4>How it works:</h4>
-                <ol>
-                <li>Select the two teams playing in the match</li>
-                <li>Choose the venue, match type, and pitch conditions</li>
-                <li>Adjust any advanced settings if needed</li>
-                <li>Click "Predict Dream11 Team" to get your optimal team</li>
-                </ol>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Feature highlights
-                st.markdown("<h2 class='sub-header'>Key Features</h2>", unsafe_allow_html=True)
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown("""
-                    <div class='stat-card' style='height: 200px;'>
-                    <h3>💡 Smart Prediction</h3>
-                    <p>Uses machine learning to predict player performance based on historical data and current conditions</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col2:
-                    st.markdown("""
-                    <div class='stat-card' style='height: 200px;'>
-                    <h3>⚖️ Optimal Balance</h3>
-                    <p>Automatically balances team composition to maximize points while meeting all Dream11 constraints</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col3:
-                    st.markdown("""
-                    <div class='stat-card' style='height: 200px;'>
-                    <h3>📊 Team Analysis</h3>
-                    <p>Provides detailed visualizations and insights about your predicted team's composition and expected performance</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-        except Exception as e:
-            st.error(f"Error running app: {str(e)}")
-            import traceback
-            st.exception(traceback.format_exc())
+                 players_by_role[role].append(player)
+
+        # Use columns for better layout - Adjust number based on expected roles with players
+        active_roles = [r for r in role_mapping_display if r in players_by_role and players_by_role[r]]
+        if 'Unknown' in players_by_role and players_by_role['Unknown']:
+             active_roles.append('Unknown')
+
+        if not active_roles:
+            st.warning("No players found in standard roles to display.")
+            return
+
+        cols = st.columns(len(active_roles))
+        role_order = ['WK', 'BAT', 'AR', 'BOWL', 'Unknown'] # Desired display order including Unknown
+
+        col_idx = 0
+        for role in role_order:
+            if role in players_by_role and players_by_role[role]:
+                role_display_name = role_mapping_display.get(role, role) # Use friendly name or role code
+                with cols[col_idx]:
+                    st.markdown(f"**{role_display_name} ({len(players_by_role[role])})**")
+                    # Sort players within role by points (descending)
+                    for player in sorted(players_by_role[role], key=lambda p: p.get('points', 0), reverse=True):
+                        name = player.get('name', 'Unknown Player')
+                        team = player.get('team', 'N/A')
+                        points = player.get('points', 0)
+                        credits_ = player.get('credits', 0)
+                        marker = ""
+                        if name == captain_name:
+                            # Use HTML with distinct styling for C/VC
+                            marker = " <span style='color: #FFD700; background-color: #4a4a4a; padding: 1px 4px; border-radius: 3px; font-weight: bold; font-size: 0.8em;'>C</span>"
+                        elif name == vice_captain_name:
+                            marker = " <span style='color: #C0C0C0; background-color: #4a4a4a; padding: 1px 4px; border-radius: 3px; font-weight: bold; font-size: 0.8em;'>VC</span>"
+
+                        # Display player info with points and credits in a card-like format
+                        st.markdown(
+                            f"<div style='margin-bottom: 6px; padding: 6px 8px; border-radius: 5px; background-color: #f0f2f6; border-left: 3px solid #6c757d;'>"
+                            f"<strong style='font-size: 0.95em; display: inline-block; margin-right: 5px;'>{name}</strong>{marker}<br>"
+                            f"<small style='color: #555;'>Team: {team} | Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
+                col_idx += 1 # Move to the next column only if the current one was used
+
+        # --- Impact Players --- #
+        st.markdown("---")
+        st.markdown("#### 🔄 Impact Player Suggestions")
+        impact_players = result.get('impact_players', [])
+        if impact_players:
+             # Determine number of columns based on number of players (max 4)
+             num_impact_players = len(impact_players)
+             num_cols = min(num_impact_players, 4)
+             if num_cols <= 0 : num_cols = 1 # Ensure at least one column if players exist
+
+             impact_cols = st.columns(num_cols)
+             # Sort impact players by predicted points
+             sorted_impact_players = sorted(impact_players, key=lambda p: p.get('predicted_points', p.get('points', 0)), reverse=True)
+
+             for i, player in enumerate(sorted_impact_players):
+                 col_index = i % num_cols
+                 with impact_cols[col_index]:
+                     # Extract details safely
+                     name = player.get('name', player.get('Player Name', 'Unknown'))
+                     role = self.standardize_role(player.get('role', player.get('Role', 'N/A'))) # Standardize role for display consistency
+                     team = player.get('team', player.get('Team', 'N/A'))
+                     points = player.get('predicted_points', player.get('points', 0))
+                     credits_ = player.get('credits', player.get('Credits', 0))
+
+                     # Display using similar card styling
+                     st.markdown(
+                         f"<div style='margin-bottom: 6px; padding: 6px 8px; border-radius: 5px; background-color: #e8f0fe; border-left: 3px solid #007bff;'>"
+                         f"<strong style='font-size: 0.9em;'>{name}</strong> <span style='font-size: 0.8em;'>({role}, {team})</span><br>"
+                         f"<small style='color: #555;'>Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
+                         f"</div>",
+                         unsafe_allow_html=True
+                     )
+        else:
+             st.info("No specific impact players were selected or recommended based on current criteria.")
+
 
 if __name__ == "__main__":
     app = Dream11App()
-    app.run() 
+    app.run_app() 
