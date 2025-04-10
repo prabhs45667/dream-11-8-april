@@ -65,6 +65,23 @@ class Dream11ModelIntegrator:
             logger.error("Failed to train models")
             # Consider how to handle this - maybe raise an exception?
             
+    def get_available_pitch_types(self):
+        """Return the list of pitch types for which models are available."""
+        # Ensure models are loaded
+        if not hasattr(self.model_trainer, 'models') or not self.model_trainer.models:
+            logger.warning("Models not loaded yet in model_trainer. Attempting to load.")
+            self.load_or_train_models()
+        
+        # Check again after loading
+        if not hasattr(self.model_trainer, 'models') or not self.model_trainer.models:
+            logger.error("Models dictionary is still missing or empty after load attempt.")
+            return [] # Return empty list if models cannot be confirmed
+            
+        # Return keys excluding 'fallback' as it's not a user-selectable pitch type
+        available_types = [ptype for ptype in self.model_trainer.models.keys() if ptype != 'fallback']
+        logger.debug(f"Found available pitch types: {available_types}")
+        return available_types
+            
     def predict_player_points(self, player_data, match_info):
         """
         Predict fantasy points for players, using pitch-specific model first,
@@ -123,8 +140,12 @@ class Dream11ModelIntegrator:
                     return player_data 
                 else:
                     logger.info("Successfully predicted points using the fallback model.")
+                    # Log fallback predictions
+                    logger.info(f"Fallback Predictions:\\n{result_df[['player_name', 'predicted_points']].to_string()}") # LOG PREDICTIONS
             else:
                  logger.info(f"Successfully predicted points using the '{pitch_type}' model.")
+                 # Log pitch-specific predictions
+                 logger.info(f"'{pitch_type}' Predictions:\\n{result_df[['player_name', 'predicted_points']].to_string()}") # LOG PREDICTIONS
 
             # Merge predictions back into the original structure if needed, 
             # or just return the result_df which now contains predictions.

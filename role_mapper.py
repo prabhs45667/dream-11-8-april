@@ -42,6 +42,11 @@ class RoleMapper:
             # Convert to string, uppercase and strip whitespace
             role_str = str(role).upper().strip()
             
+            # Handle 'ROLE' explicitly - it's likely a placeholder
+            if role_str == 'ROLE':
+                print(f"Warning: Found placeholder 'ROLE', defaulting to BAT")
+                return 'BAT'
+                
             # Direct match check
             for std_role, variants in self.role_mapping.items():
                 if role_str in variants:

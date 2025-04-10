@@ -793,9 +793,17 @@ class Dream11App:
                 try:
                     logger.info(f"Attempting prediction using ModelIntegrator for pitch: {pitch_type}")
                     # Pass the original squad df, integrator handles feature eng.
+                    # Correction: Pass pitch_type within match_info dictionary
+                    match_info = {
+                        'pitch_type': pitch_type,
+                        'venue': venue, # Pass venue if available
+                        'home_team': home_team, # Pass teams if available
+                        'away_team': away_team
+                    }
                     predicted_points_df = self.model_integrator.predict_player_points(
                         player_data=team_squads.copy(), # Pass a copy
-                        pitch_type=pitch_type
+                        # pitch_type=pitch_type # Incorrect argument
+                        match_info=match_info # Correct argument
                     )
                     # Validate the output
                     if predicted_points_df is not None and not predicted_points_df.empty:
@@ -874,7 +882,8 @@ class Dream11App:
                 'players': players_dict,
                 'role_requirements': role_requirements,
                 'max_credits': 100,
-                'team_ratio_limit': 7
+                'team_ratio_limit': 7,
+                'max_players': 11
             }
 
             selected_team_result = None
@@ -883,28 +892,42 @@ class Dream11App:
                 if not self.optimizer:
                      logger.error("TeamOptimizer not initialized.")
                      raise ValueError("Optimizer not available.")
+
                 selected_team_result = self.optimizer.solve_optimization_problem(problem)
-                if selected_team_result is None or not selected_team_result.get('selected_players'):
-                     logger.warning("Optimization failed or returned empty team. Trying greedy fallback.")
-                     selected_team_result = self._fallback_greedy_selection(team_squads, role_requirements)
-                     if selected_team_result is None:
-                          logger.error("Greedy fallback also failed.")
-                          st.error("Both optimization and fallback methods failed to select a team.")
-                          return None
-                     else:
-                          logger.info("Greedy fallback selection successful.")
+
+                # Check the result type and handle accordingly
+                if isinstance(selected_team_result, list) and len(selected_team_result) > 0:
+                    # Optimization succeeded and returned a list of players
+                    logger.info(f"Optimization successful (returned list of {len(selected_team_result)} players).")
+                    # Convert list to the expected dictionary format for downstream processing
+                    selected_team_result = {
+                        'selected_players': selected_team_result,
+                        'details': 'Optimization successful'
+                    }
+                elif isinstance(selected_team_result, dict) and selected_team_result.get('selected_players'):
+                    # Result is already a dictionary (possibly from fallback or other path)
+                    logger.info("Selection successful (received dictionary).")
+                    # No conversion needed, use as is
                 else:
-                     logger.info("Optimization successful.")
+                    # Optimization failed or returned unexpected format
+                    logger.warning(f"Optimization failed or returned unexpected format: {type(selected_team_result)}. Trying greedy fallback.")
+                    # Ensure we have a clean slate for fallback
+                    selected_team_result = None  
+                    greedy_result = self._fallback_greedy_selection(team_squads, role_requirements)
+                    
+                    if isinstance(greedy_result, dict) and greedy_result.get('selected_players'):
+                         selected_team_result = greedy_result  # Use the greedy result
+                         logger.info("Greedy fallback selection successful.")
+                    else:
+                         logger.error("Greedy fallback also failed or returned empty team.")
+                         st.error("Both optimization and fallback methods failed to select a team.")
+                         return None
+                         
             except Exception as e:
-                logger.error(f"Error during team optimization: {e}", exc_info=True)
-                st.error(f"Optimization error: {e}. Trying greedy fallback.")
-                selected_team_result = self._fallback_greedy_selection(team_squads, role_requirements)
-                if selected_team_result is None:
-                     logger.error("Greedy fallback failed after optimization error.")
-                     st.error("Both optimization and fallback methods failed to select a team.")
-                     return None
-                else:
-                     logger.info("Greedy fallback successful after optimization error.")
+                logger.error(f"Error during team optimization or fallback: {e}", exc_info=True)
+                st.error(f"Optimization/Fallback error: {e}.")
+                # Ensure selected_team_result is None if an exception occurs
+                selected_team_result = None
 
             if selected_team_result is None:
                  logger.critical("Selected team result is None after all attempts.")
@@ -947,13 +970,27 @@ class Dream11App:
             selected_player_names = {p['name'] for p in selected_team_result.get('selected_players', [])}
             available_for_impact = team_squads[~team_squads['Player Name'].isin(selected_player_names)].copy()
 
-            impact_players = []
-            if not available_for_impact.empty:
+            # Correction: Create selected_team_df before calling select_impact_players
+            selected_team_list = selected_team_result.get('selected_players', [])
+            selected_team_df = pd.DataFrame(selected_team_list) if selected_team_list else pd.DataFrame()
+
+            impact_players_list = [] # Renamed to avoid confusion with df
+            if not available_for_impact.empty and not selected_team_df.empty:
                 logger.info(f"Selecting impact players from {len(available_for_impact)} available candidates.")
                 try:
                     if hasattr(self.optimizer, 'select_impact_players'):
-                         impact_players = self.optimizer.select_impact_players(available_for_impact)
-                         selected_team_result['impact_players'] = impact_players if impact_players is not None else []
+                         # Pass both available players and the selected team DataFrame
+                         impact_players_df = self.optimizer.select_impact_players(
+                             all_players_df=available_for_impact,
+                             selected_team_df=selected_team_df
+                         )
+                         # Convert DataFrame back to list of dicts if needed
+                         if impact_players_df is not None and not impact_players_df.empty:
+                             impact_players_list = impact_players_df.to_dict('records')
+                         else:
+                             impact_players_list = []
+
+                         selected_team_result['impact_players'] = impact_players_list
                          logger.info(f"Selected {len(selected_team_result['impact_players'])} impact players.")
                     else:
                          logger.warning("Optimizer object missing 'select_impact_players' method.")
@@ -962,7 +999,10 @@ class Dream11App:
                     logger.error(f"Error selecting impact players: {e}", exc_info=True)
                     st.warning(f"Could not select impact players due to an error: {e}")
                     selected_team_result['impact_players'] = []
-            else:
+            elif selected_team_df.empty:
+                 logger.warning("No selected players found, cannot select impact players.")
+                 selected_team_result['impact_players'] = []
+            else: # available_for_impact is empty
                  logger.warning("No players available for impact player selection.")
                  selected_team_result['impact_players'] = []
 
@@ -976,24 +1016,65 @@ class Dream11App:
             return None
 
     def _fallback_greedy_selection(self, player_df, role_requirements):
-        """Simple greedy selection based on predicted points as a fallback."""
-        logger.info("Using fallback greedy team selection.")
+        """Improved greedy selection that prioritizes selecting required roles like WK."""
+        logger.info("Using IMPROVED fallback greedy team selection.")
         try:
-            # Ensure points are numeric and sort
+            # Ensure points and credits are numeric
             player_df['predicted_points'] = pd.to_numeric(player_df['predicted_points'], errors='coerce').fillna(0)
-            player_df['Credits'] = pd.to_numeric(player_df['Credits'], errors='coerce').fillna(8.0) # Ensure credits are numeric
+            player_df['Credits'] = pd.to_numeric(player_df['Credits'], errors='coerce').fillna(8.0)
 
-            sorted_players = player_df.sort_values('predicted_points', ascending=False).to_dict('records')
-
+            # --- Initialization ---
             selected_players = []
             current_credits = 0
             team_counts = {}
             role_counts = {role: 0 for role in ['WK', 'BAT', 'AR', 'BOWL']}
             max_credits = 100
             max_players_from_team = 7
+            min_wk_req = role_requirements.get('WK', (1, 4))[0]
+            available_players_df = player_df.copy()
 
-            for player in sorted_players:
-                if len(selected_players) == 11:
+            # --- Step 1: Select Minimum Required WKs --- #
+            wks_needed = min_wk_req - role_counts.get('WK', 0)
+            if wks_needed > 0:
+                wk_candidates = available_players_df[available_players_df['Role'] == 'WK'].sort_values('predicted_points', ascending=False)
+                if len(wk_candidates) < wks_needed:
+                     logger.error(f"Greedy Fallback Error: Not enough WKs ({len(wk_candidates)}) available in squad to meet minimum requirement ({wks_needed}).")
+                     st.error(f"Error: Not enough Wicket Keepers available in the player pool to form a valid team.")
+                     return None
+
+                wk_selected_count = 0
+                for _, wk in wk_candidates.iterrows():
+                    if wk_selected_count >= wks_needed:
+                         break
+                    wk_credits = float(wk['Credits'])
+                    wk_team = wk['Team']
+                    # Check budget, team limit for this specific WK
+                    if current_credits + wk_credits <= max_credits and team_counts.get(wk_team, 0) < max_players_from_team:
+                        player_dict = {
+                            'name': wk['Player Name'], 'team': wk_team, 'role': 'WK', 'credits': wk_credits, 'points': wk['predicted_points']
+                        }
+                        selected_players.append(player_dict)
+                        current_credits += wk_credits
+                        team_counts[wk_team] = team_counts.get(wk_team, 0) + 1
+                        role_counts['WK'] = role_counts.get('WK', 0) + 1
+                        # Remove selected WK from available pool
+                        available_players_df = available_players_df[available_players_df['Player Name'] != wk['Player Name']]
+                        wk_selected_count += 1
+
+                # Check if we managed to select the required WKs
+                if wk_selected_count < wks_needed:
+                     logger.error(f"Greedy Fallback Error: Could not select {wks_needed} WKs due to budget/team constraints.")
+                     st.error(f"Fallback selection failed: Could not include the required {wks_needed} Wicket Keeper(s) within budget/team limits.")
+                     return None
+                logger.info(f"Successfully selected {wk_selected_count} WK(s) first.")
+
+            # --- Step 2: Select Remaining Players Greedily --- #
+            remaining_players_needed = 11 - len(selected_players)
+            # Sort remaining available players by points
+            sorted_remaining = available_players_df.sort_values('predicted_points', ascending=False).to_dict('records')
+
+            for player in sorted_remaining:
+                if len(selected_players) >= 11:
                     break
 
                 player_role = player.get('Role')
@@ -1003,7 +1084,7 @@ class Dream11App:
 
                 # Basic checks
                 if not all([player_name, player_role, player_team, isinstance(player_credits, (int, float))]):
-                    logger.warning(f"Skipping player in greedy fallback due to missing data: {player_name}")
+                    logger.warning(f"Skipping player {player_name} in greedy step 2 due to missing data.")
                     continue
                 player_credits = float(player_credits)
 
@@ -1015,47 +1096,42 @@ class Dream11App:
                 if team_counts.get(player_team, 0) >= max_players_from_team:
                     continue
 
-                # Check role counts (consider max limits)
+                # Check role *maximum* counts
                 role_max = role_requirements.get(player_role, (0, 11))[1]
                 if role_counts.get(player_role, 0) >= role_max:
                     continue
 
                 # Add player
                 selected_players.append({
-                    'name': player_name,
-                    'team': player_team,
-                    'role': player_role,
-                    'credits': player_credits,
-                    'points': player['predicted_points']
+                    'name': player_name, 'team': player_team, 'role': player_role, 'credits': player_credits, 'points': player['predicted_points']
                 })
                 current_credits += player_credits
                 team_counts[player_team] = team_counts.get(player_team, 0) + 1
                 role_counts[player_role] = role_counts.get(player_role, 0) + 1
 
-            # Final check for minimum role requirements
-            final_role_counts = {role: 0 for role in ['WK', 'BAT', 'AR', 'BOWL']}
-            for p in selected_players:
-                final_role_counts[p['role']] = final_role_counts.get(p['role'], 0) + 1
-
+            # --- Step 3: Final Validation --- #
+            final_role_counts = role_counts # Already have the final counts
             valid_team = True
             if len(selected_players) != 11:
-                logger.error(f"Greedy fallback only selected {len(selected_players)} players.")
-                valid_team = False
+                logger.error(f"Improved Greedy fallback only selected {len(selected_players)} players.")
+                st.error(f"Fallback selection error: Could only select {len(selected_players)} players within constraints.")
+                # If we couldn't even get 11 players, something is wrong (likely budget or availability)
+                return None # Fail if not 11 players
 
+            # Check *other* minimum role requirements (WK is guaranteed if we got here)
             for role, (min_req, _) in role_requirements.items():
-                if final_role_counts.get(role, 0) < min_req:
-                    logger.warning(f"Greedy fallback failed minimum role requirement for {role}: Needed {min_req}, Got {final_role_counts.get(role, 0)}")
-                    valid_team = False
-                    # Don't break, report all unmet requirements
+                 if role == 'WK': continue # Already handled
+                 if final_role_counts.get(role, 0) < min_req:
+                      logger.warning(f"Improved Greedy fallback failed minimum role requirement for {role}: Needed {min_req}, Got {final_role_counts.get(role, 0)}")
+                      valid_team = False # Mark as potentially incomplete but don't fail
+                      st.warning(f"Warning: Fallback team might be incomplete. Could not meet minimum for {role} ({final_role_counts.get(role, 0)}/{min_req}).")
 
-            if not valid_team:
-                logger.error("Greedy fallback failed to form a valid 11-player team meeting all requirements.")
-                st.warning("Greedy fallback could not meet all team constraints. Results may be incomplete.")
-                # Return the partial team anyway, maybe better than nothing?
-                # return None # Or return partial result
+            logger.info(f"Improved Greedy fallback selection completed. Players: {len(selected_players)}, Valid (minimums met): {valid_team}")
 
             # Construct result dictionary
             total_points = sum(p['points'] for p in selected_players)
+            # Sort final selected list by points for C/VC assignment
+            selected_players.sort(key=lambda p: p.get('points', 0), reverse=True)
             captain = selected_players[0]['name'] if selected_players else 'N/A'
             vice_captain = selected_players[1]['name'] if len(selected_players) > 1 else captain
             if captain == vice_captain and len(selected_players) > 1:
@@ -1063,7 +1139,6 @@ class Dream11App:
             elif captain == vice_captain:
                 vice_captain = 'N/A'
 
-            logger.info(f"Greedy fallback selection completed. Valid: {valid_team}")
             return {
                 'selected_players': selected_players,
                 'total_credits': current_credits,
@@ -1075,7 +1150,8 @@ class Dream11App:
                 'impact_players': [] # Greedy doesn't select impact players
             }
         except Exception as e:
-            logger.error(f"Error in fallback greedy selection: {e}", exc_info=True)
+            logger.error(f"Error in improved fallback greedy selection: {e}", exc_info=True)
+            st.error(f"An unexpected error occurred in the fallback team selection: {e}")
             return None
 
     def plot_team_composition(self, team):
@@ -1375,7 +1451,77 @@ class Dream11App:
         return self.role_mapper.standardize_role(role)
         
     def run_app(self):
-        st.set_page_config(layout="wide")
+        # Set page config - added theme="dark"
+        try:
+            st.set_page_config(layout="wide", page_title="Dream11 Predictor", initial_sidebar_state="expanded")
+            # Attempt to set theme via config if set_page_config doesn't support 'theme'
+            # This might require creating a .streamlit/config.toml file
+            # st.config.set_option('theme.base', 'dark')
+        except Exception as e:
+             logger.warning(f"Could not set page config fully: {e}")
+             st.set_page_config(layout="wide") # Fallback
+
+        # --- Apply Custom CSS for Dark Theme adjustments --- # 
+        # Use a standard triple-quoted string for CSS
+        dark_theme_css = """
+        <style>
+        /* Ensure text is visible on dark background */
+        body {
+            color: #f1f1f1; /* Light grey text */
+            background-color: #0e1117; /* Default Streamlit dark background */
+        }
+        /* Style headers */
+        h1, h2, h3, h4, h5, h6 {
+            color: #f1f1f1;
+        }
+        /* Style the metric labels and values */
+        .stMetric > label {
+            color: #a0a0a0; /* Lighter label color */
+        }
+        .stMetric > div {
+            color: #f1f1f1; /* Value color */
+        }
+        /* Player card styling */
+        .player-card {
+            margin-bottom: 6px; 
+            padding: 6px 8px; 
+            border-radius: 5px; 
+            background-color: #262730; /* Darker card background */
+            border-left: 3px solid #6c757d;
+            color: #f1f1f1;
+        }
+        .player-card strong {
+             font-size: 0.95em; display: inline-block; margin-right: 5px;
+        }
+        .player-card small {
+            color: #a0a0a0; /* Lighter grey for subtext */
+        }
+        /* Impact player card styling */
+        .impact-player-card {
+             margin-bottom: 6px; 
+             padding: 6px 8px; 
+             border-radius: 5px; 
+             background-color: #1f2937; /* Slightly different dark blueish */
+             border-left: 3px solid #007bff;
+             color: #f1f1f1;
+        }
+        .impact-player-card strong {
+            font-size: 0.9em;
+        }
+        .impact-player-card small {
+            color: #a0a0a0;
+        }
+        /* C/VC markers */
+        .captain-marker {
+            color: #FFD700; background-color: #4a4a4a; padding: 1px 4px; border-radius: 3px; font-weight: bold; font-size: 0.8em;
+        }
+        .vice-captain-marker {
+             color: #C0C0C0; background-color: #4a4a4a; padding: 1px 4px; border-radius: 3px; font-weight: bold; font-size: 0.8em;
+        }
+        </style>
+        """
+        st.markdown(dark_theme_css, unsafe_allow_html=True)
+
         st.title("🏏 Dream11 Team Predictor App")
         logger.info("Running Streamlit app UI...")
 
@@ -1553,15 +1699,15 @@ class Dream11App:
                         marker = ""
                         if name == captain_name:
                             # Use HTML with distinct styling for C/VC
-                            marker = " <span style='color: #FFD700; background-color: #4a4a4a; padding: 1px 4px; border-radius: 3px; font-weight: bold; font-size: 0.8em;'>C</span>"
+                            marker = " <span class='captain-marker'>C</span>"
                         elif name == vice_captain_name:
-                            marker = " <span style='color: #C0C0C0; background-color: #4a4a4a; padding: 1px 4px; border-radius: 3px; font-weight: bold; font-size: 0.8em;'>VC</span>"
+                            marker = " <span class='vice-captain-marker'>VC</span>"
 
                         # Display player info with points and credits in a card-like format
                         st.markdown(
-                            f"<div style='margin-bottom: 6px; padding: 6px 8px; border-radius: 5px; background-color: #f0f2f6; border-left: 3px solid #6c757d;'>"
-                            f"<strong style='font-size: 0.95em; display: inline-block; margin-right: 5px;'>{name}</strong>{marker}<br>"
-                            f"<small style='color: #555;'>Team: {team} | Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
+                            f"<div class='player-card'>"
+                            f"<strong>{name}</strong>{marker}<br>"
+                            f"<small>Team: {team} | Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
                             f"</div>",
                             unsafe_allow_html=True
                         )
@@ -1593,9 +1739,9 @@ class Dream11App:
 
                      # Display using similar card styling
                      st.markdown(
-                         f"<div style='margin-bottom: 6px; padding: 6px 8px; border-radius: 5px; background-color: #e8f0fe; border-left: 3px solid #007bff;'>"
-                         f"<strong style='font-size: 0.9em;'>{name}</strong> <span style='font-size: 0.8em;'>({role}, {team})</span><br>"
-                         f"<small style='color: #555;'>Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
+                         f"<div class='impact-player-card'>"
+                         f"<strong>{name}</strong> <span style='font-size: 0.8em;'>({role}, {team})</span><br>"
+                         f"<small>Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
                          f"</div>",
                          unsafe_allow_html=True
                      )
