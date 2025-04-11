@@ -6,8 +6,11 @@ import logging
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression  # Added for fallback
 from sklearn.metrics import r2_score, mean_absolute_error
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from feature_engineering import FeatureEngineer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -41,6 +44,14 @@ class PitchSpecificModelTrainer:
         
         # Initialize models dictionary (including fallback)
         self.models = {
+            'balanced': None,
+            'batting_friendly': None,
+            'bowling_friendly': None,
+            'fallback': None  # Added for the baseline model
+        }
+        
+        # Initialize imputers dictionary
+        self.imputers = {
             'balanced': None,
             'batting_friendly': None,
             'bowling_friendly': None,
@@ -368,35 +379,87 @@ class PitchSpecificModelTrainer:
                 if model_key == 'fallback':
                     # Simple Linear Regression for fallback
                     model = LinearRegression()
+                    imputer = None # No imputation needed for Linear Regression
                 elif model_key == 'balanced':
                     model = RandomForestRegressor(
-                        n_estimators=100, max_depth=15, min_samples_split=5,
-                        min_samples_leaf=2, random_state=42, n_jobs=-1
+                        n_estimators=200, # Increased from 100
+                        max_depth=20,     # Increased from 15
+                        min_samples_split=5,
+                        min_samples_leaf=2,
+                        random_state=42,
+                        n_jobs=-1,        # Use all available cores
+                        bootstrap=True,   # Enable bootstrapping for better robustness
+                        max_features='sqrt' # Use sqrt of features for better generalization
                     )
+                    imputer = SimpleImputer(strategy='mean')
                 elif model_key == 'batting_friendly':
                     model = GradientBoostingRegressor(
-                        n_estimators=100, max_depth=10, learning_rate=0.1,
-                        subsample=0.8, random_state=42
+                        n_estimators=250, # Increased from 100
+                        max_depth=12,     # Increased from 10
+                        learning_rate=0.08, # Lowered for better convergence with more trees
+                        subsample=0.85,   # Increased from 0.8
+                        random_state=42,
+                        verbose=0,
+                        validation_fraction=0.1, # Use 10% for validation during training
+                        n_iter_no_change=15,     # Early stopping after 15 iterations with no improvement
+                        warm_start=True          # Use previous solution to fit additional estimators
                     )
+                    imputer = SimpleImputer(strategy='mean')
                 else: # bowling_friendly
                     model = GradientBoostingRegressor(
-                        n_estimators=100, max_depth=8, learning_rate=0.05,
-                        subsample=0.7, random_state=42
+                        n_estimators=250, # Increased from 100
+                        max_depth=10,     # Increased from 8
+                        learning_rate=0.05,
+                        subsample=0.8,    # Increased from 0.7
+                        random_state=42,
+                        verbose=0,
+                        validation_fraction=0.1, # Use 10% for validation during training
+                        n_iter_no_change=15,     # Early stopping after 15 iterations with no improvement
+                        warm_start=True          # Use previous solution to fit additional estimators
                     )
+                    imputer = SimpleImputer(strategy='mean')
                 
-                # Align columns before training/prediction if needed
-                if 'fallback' in model_key and 'fallback' in features_targets:
-                   common_cols = list(set(X_train.columns) & set(X_test.columns))
-                   X_train = X_train[common_cols]
-                   X_test = X_test[common_cols]
-                   # Ensure test set has all columns from train set (add missing with 0)
-                   for col in X_train.columns:
-                       if col not in X_test.columns:
-                           X_test[col] = 0
-                   X_test = X_test[X_train.columns] # Ensure same order
+                # Align columns before imputation/training if needed
+                if 'fallback' not in model_key: # Align for pitch-specific models
+                    # Get common columns between train and test
+                    common_cols = list(set(X_train.columns) & set(X_test.columns))
+                    X_train = X_train[common_cols]
+                    X_test = X_test[common_cols]
+                    
+                    # Ensure test set has all columns from train set (add missing with 0)
+                    for col in X_train.columns:
+                        if col not in X_test.columns:
+                            X_test[col] = 0
+                    X_test = X_test[X_train.columns] # Ensure same order
 
+                # Store column names before imputation (imputer converts to numpy array)
+                X_train_columns = X_train.columns.tolist() if isinstance(X_train, pd.DataFrame) else None
+                
+                # Impute missing values if needed
+                if imputer:
+                    logger.info(f"Applying SimpleImputer (strategy='{imputer.strategy}') to {model_key} data")
+                    X_train = imputer.fit_transform(X_train)
+                    X_test = imputer.transform(X_test)
+                    # Save the imputer along with the model
+                    self.imputers[model_key] = imputer
+                    
+                # Evaluate with cross-validation before final training
+                if model_key != 'fallback' and hasattr(model, 'fit'):
+                    logger.info(f"Performing 5-fold cross-validation for {model_key} model")
+                    start_time = time.time()
+                    cv_scores = cross_val_score(model, X_train, y_train, 
+                                               cv=KFold(n_splits=5, shuffle=True, random_state=42),
+                                               scoring='neg_mean_absolute_error', 
+                                               n_jobs=-1)
+                    cv_time = time.time() - start_time
+                    logger.info(f"Cross-validation MAE: {-np.mean(cv_scores):.2f} ±{np.std(cv_scores):.2f}, completed in {cv_time:.2f}s")
+                    
                 # Train the model
+                logger.info(f"Training final {model_key} model...")
+                start_time = time.time()
                 model.fit(X_train, y_train)
+                training_time = time.time() - start_time
+                logger.info(f"Model training completed in {training_time:.2f}s")
                 
                 # Evaluate on training set
                 train_pred = model.predict(X_train)
@@ -410,12 +473,15 @@ class PitchSpecificModelTrainer:
                 
                 # Feature importance (if applicable)
                 top_features = []
-                if hasattr(model, 'feature_importances_'):
-                    feature_importance = dict(zip(X_train.columns, model.feature_importances_))
-                    top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:10]
-                elif hasattr(model, 'coef_'): # For Linear Regression
-                    coef_importance = dict(zip(X_train.columns, model.coef_))
-                    top_features = sorted(coef_importance.items(), key=lambda x: abs(x[1]), reverse=True)[:10]
+                if X_train_columns: # Ensure we have column names
+                    if hasattr(model, 'feature_importances_'):
+                        feature_importance = dict(zip(X_train_columns, model.feature_importances_))
+                        top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:10]
+                    elif hasattr(model, 'coef_'): # For Linear Regression
+                        coef_importance = dict(zip(X_train_columns, model.coef_))
+                        top_features = sorted(coef_importance.items(), key=lambda x: abs(x[1]), reverse=True)[:10]
+                else:
+                     logger.warning(f"Could not determine feature names for {model_key} model to calculate importance.")
 
                 # Store the model
                 self.models[model_key] = model
@@ -433,7 +499,7 @@ class PitchSpecificModelTrainer:
                 
                 logger.info(f"{model_key} model: Test R² = {test_r2:.4f}, MAE = {test_mae:.2f}")
                 
-            # Save models
+            # Save models and imputers
             self.save_models()
             
             return results
@@ -445,33 +511,54 @@ class PitchSpecificModelTrainer:
             return None
             
     def save_models(self):
-        """Save trained models to disk"""
+        """Save trained models and imputers to disk"""
         try:
+            # Save models
             for model_key, model in self.models.items():
                 if model is not None:
                     model_path = os.path.join(self.models_dir, f"{model_key}_model.pkl")
                     joblib.dump(model, model_path)
                     logger.info(f"Saved {model_key} model to {model_path}")
                     
+            # Save imputers
+            for model_key, imputer in self.imputers.items():
+                if imputer is not None:
+                    imputer_path = os.path.join(self.models_dir, f"{model_key}_imputer.pkl")
+                    joblib.dump(imputer, imputer_path)
+                    logger.info(f"Saved {model_key} imputer to {imputer_path}")
+                    
         except Exception as e:
-            logger.error(f"Error saving models: {str(e)}")
+            logger.error(f"Error saving models/imputers: {str(e)}")
             import traceback
             traceback.print_exc()
             
     def load_models(self):
-        """Load trained models from disk"""
+        """Load trained models and imputers from disk"""
         try:
             loaded_any = False
+            # Load models
             for model_key in self.models.keys(): # Includes 'fallback'
                 model_path = os.path.join(self.models_dir, f"{model_key}_model.pkl")
                 if os.path.exists(model_path):
                     self.models[model_key] = joblib.load(model_path)
                     logger.info(f"Loaded {model_key} model from {model_path}")
                     loaded_any = True
+            
+            # Load imputers
+            for model_key in self.models.keys(): # Only load for models that need it
+                 if model_key != 'fallback':
+                    imputer_path = os.path.join(self.models_dir, f"{model_key}_imputer.pkl")
+                    if os.path.exists(imputer_path):
+                        self.imputers[model_key] = joblib.load(imputer_path)
+                        logger.info(f"Loaded {model_key} imputer from {imputer_path}")
+                    else:
+                         # If imputer is missing, it might cause issues during prediction
+                         logger.warning(f"Imputer for {model_key} not found at {imputer_path}. Prediction might fail if NaNs are present.")
+                         self.imputers[model_key] = None # Explicitly set to None
             return loaded_any
             
         except Exception as e:
-            logger.error(f"Error loading models: {str(e)}")
+            logger.error(f"Error loading models/imputers: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -496,21 +583,32 @@ class PitchSpecificModelTrainer:
                 logger.warning(f"Invalid pitch type: {pitch_type}. Using 'balanced' instead.")
                 model_key = 'balanced'
                 
-            # Get the appropriate model
+            # Get the appropriate model and imputer
             model = self.models.get(model_key)
+            imputer = self.imputers.get(model_key)
             
             if model is None:
-                # Try to load the specific model
+                logger.warning(f"Model for {model_key} not loaded. Trying to load.")
+                # Try to load the specific model and imputer
                 model_path = os.path.join(self.models_dir, f"{model_key}_model.pkl")
+                imputer_path = os.path.join(self.models_dir, f"{model_key}_imputer.pkl")
+                
                 if os.path.exists(model_path):
                      self.models[model_key] = joblib.load(model_path)
                      model = self.models[model_key]
                      logger.info(f"Loaded {model_key} model for prediction.")
+                     if model_key != 'fallback' and os.path.exists(imputer_path):
+                         self.imputers[model_key] = joblib.load(imputer_path)
+                         imputer = self.imputers[model_key]
+                         logger.info(f"Loaded {model_key} imputer for prediction.")
+                     elif model_key != 'fallback':
+                          logger.warning(f"Imputer for {model_key} not found. Prediction might fail.")
                 else:
                     logger.warning(f"Model for {model_key} not found. Trying fallback.")
                     # Try loading fallback if the specific model failed
                     model_key = 'fallback'
                     model = self.models.get(model_key)
+                    imputer = None # Fallback doesn't use imputer
                     if model is None:
                          model_path_fb = os.path.join(self.models_dir, f"{model_key}_model.pkl")
                          if os.path.exists(model_path_fb):
@@ -519,110 +617,134 @@ class PitchSpecificModelTrainer:
                               logger.info(f"Loaded {model_key} model for prediction.")
                          else:
                               logger.error(f"Fallback model also not found. Cannot predict.")
-                              # If fallback also fails, potentially return None or raise error
-                              # For now, let's allow it to proceed, but log the error
-                              # The feature preparation might still happen, but prediction will fail later
                               return player_data # Return original data if no model can predict
 
             logger.info(f"Using {model_key} model for prediction.")
 
-            # Apply feature engineering if using a pitch-specific model
+            # Apply feature engineering if needed (usually needed for all)
             df = player_data.copy()
-            if model_key != 'fallback':
-                 home_team = df['home_team'].iloc[0] if 'home_team' in df.columns else 'CSK'
-                 away_team = df['away_team'].iloc[0] if 'away_team' in df.columns else 'MI'
-                 venue = df['venue'].iloc[0] if 'venue' in df.columns else 'MA Chidambaram Stadium'
-                 df['pitch_type'] = pitch_type # Ensure pitch type is set
-                 enhanced_df = self.feature_engineer.enhance_player_features(
-                     df, home_team=home_team, away_team=away_team, venue=venue
-                 )
-            else:
-                 enhanced_df = df # Use base features for fallback
-
-            # Prepare features based on the selected model (pitch-specific or fallback)
-            if model_key == 'fallback':
-                base_cols = ['credits']
-                cat_cols = ['role', 'team']
-                feature_cols = [col for col in base_cols + cat_cols if col in enhanced_df.columns]
-            else:
-                 # Use features defined during training preparation for pitch-specific
-                 categorical_cols = ['role', 'pitch_type', 'team']
-                 role_indicators = [col for col in enhanced_df.columns if col.startswith('is_')]
-                 team_features = [col for col in enhanced_df.columns if col.startswith('vs_team_')]
-                 venue_features = [col for col in enhanced_df.columns if col in [
-                     'venue_advantage', 'pitch_factor', 'pitch_is_batting_friendly',
-                     'pitch_is_bowling_friendly', 'pitch_is_balanced'
-                 ]]
-                 form_features = [col for col in enhanced_df.columns if col in [
-                     'recent_form', 'last_3_avg', 'last_5_avg', 'form_trend'
-                 ]]
-                 interaction_features = [col for col in enhanced_df.columns if '_interaction' in col]
-                 numeric_cols = ['credits']
-                 feature_cols = numeric_cols + categorical_cols + role_indicators + \
-                                team_features + venue_features + form_features + interaction_features
-                 feature_cols = list(set(col for col in feature_cols if col in enhanced_df.columns))
-                 cat_cols = [c for c in categorical_cols if c in feature_cols] # Update cat_cols for get_dummies
-
-            X = enhanced_df[feature_cols]
-            X = pd.get_dummies(X, columns=[c for c in cat_cols if c in X.columns], drop_first=True)
+            home_team = df['home_team'].iloc[0] if 'home_team' in df.columns else 'CSK'
+            away_team = df['away_team'].iloc[0] if 'away_team' in df.columns else 'MI'
+            venue = df['venue'].iloc[0] if 'venue' in df.columns else 'MA Chidambaram Stadium'
+            df['pitch_type'] = pitch_type # Ensure pitch type is set for feature eng.
+            enhanced_df = self.feature_engineer.enhance_player_features(
+                df, home_team=home_team, away_team=away_team, venue=venue
+            )
             
-            # Ensure all model features are present
-            model_features = None
-            if hasattr(model, 'feature_names_in_'): # Scikit-learn >= 0.24
-                model_features = model.feature_names_in_
-            elif hasattr(model, 'n_features_'): # Older scikit-learn or Linear models
-                 # This is less reliable, might need adjustment based on model type
-                 pass # Cannot easily get names back for some models like LinearRegression
+            if enhanced_df is None:
+                 logger.error("Feature enhancement failed. Cannot proceed with prediction.")
+                 return player_data # Return original data
+
+            # Prepare features based on the selected model
+            # Get the trained model's expected features (columns)
+            # Need to handle case where model is loaded but features aren't stored
+            # A more robust way is to save/load feature lists with models
+            try:
+                 # Assuming model was trained on a pandas DataFrame and retains feature names
+                 if hasattr(model, 'feature_names_in_'):
+                      model_features = list(model.feature_names_in_)
+                 elif hasattr(model, 'feature_name_'): # Some models like XGBoost
+                     model_features = list(model.feature_name_)
+                 else:
+                     # Fallback: attempt to load features from a saved file or use defaults
+                     # For now, we'll assume a common feature set or risk error
+                     # Let's try to infer from a loaded model if possible, otherwise use default set
+                     logger.warning("Could not reliably determine model features. Using potentially incomplete set.")
+                     # Default fallback - less robust
+                     base_cols = ['credits']
+                     cat_cols = ['role', 'team']
+                     num_cols = ['recent_form', 'venue_avg', 'opposition_avg'] # Example numeric
+                     model_features = [col for col in base_cols + cat_cols + num_cols if col in enhanced_df.columns]
+                     if not model_features:
+                         logger.error("No usable features found for prediction.")
+                         return player_data
+                     
+            except Exception as e:
+                 logger.error(f"Error determining model features: {e}. Using defaults.")
+                 base_cols = ['credits']
+                 cat_cols = ['role', 'team']
+                 model_features = [col for col in base_cols + cat_cols if col in enhanced_df.columns]
+                 if not model_features:
+                      logger.error("No usable default features found for prediction.")
+                      return player_data
+                      
+            # Ensure player data has all the features the model expects
+            missing_cols = [col for col in model_features if col not in enhanced_df.columns]
+            if missing_cols:
+                logger.warning(f"Prediction data missing columns: {missing_cols}. Adding with 0.")
+                for col in missing_cols:
+                    enhanced_df[col] = 0
             
-            if model_features is not None:
-                missing_cols = set(model_features) - set(X.columns)
-                for c in missing_cols:
-                    X[c] = 0 # Add missing features as 0
-                X = X[model_features] # Ensure order and presence
-            else:
-                 # Fallback or Linear Model case - need to ensure columns match if possible
-                 # This part is tricky without stored feature names. 
-                 # Assume the dummy creation is consistent for now.
-                 logger.warning("Cannot verify feature names for the selected model. Assuming consistency.")
+            # Select only the features the model was trained on, in the correct order
+            prediction_features = enhanced_df[model_features]
+
+            # Apply imputation if required for this model
+            if imputer:
+                try:
+                    prediction_features_imputed = imputer.transform(prediction_features)
+                    # Imputer returns numpy array, convert back to DataFrame with correct columns
+                    prediction_features = pd.DataFrame(prediction_features_imputed, index=prediction_features.index, columns=model_features)
+                except Exception as e:
+                     logger.error(f"Error applying imputer during prediction: {e}. Prediction might be inaccurate.")
+                     # Continue without imputation? Or return? For now, continue.
 
             # Make predictions
-            predictions = model.predict(X)
+            predictions = model.predict(prediction_features)
             
-            # Add predictions to enhanced DataFrame
-            enhanced_df['predicted_points'] = predictions
-            
-            return enhanced_df
+            # Add predictions to the original DataFrame
+            player_data['predicted_points'] = predictions
+            return player_data
             
         except Exception as e:
-            logger.error(f"Error predicting with model {model_key}: {str(e)}")
+            logger.error(f"Error during prediction: {str(e)}")
             import traceback
             traceback.print_exc()
-            # Return original data + NaN predictions if error occurs during prediction
-            player_data['predicted_points'] = np.nan
+            # Return original data with maybe a flag or NaN for points?
+            player_data['predicted_points'] = np.nan # Indicate prediction failure
             return player_data
             
 # Stand-alone execution for testing and training
 if __name__ == "__main__":
-    # Initialize trainer
-    trainer = PitchSpecificModelTrainer()
+    import argparse
     
-    # Train models
-    results = trainer.train_models()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train pitch-specific models for fantasy cricket')
+    parser.add_argument('--iterations', type=int, default=1, 
+                        help='Number of training iterations with different random seeds (default: 1)')
+    parser.add_argument('--data_dir', type=str, default='dataset',
+                        help='Directory containing training data')
+    parser.add_argument('--models_dir', type=str, default='models',
+                        help='Directory to save trained models')
+    args = parser.parse_args()
     
-    # Print results
-    if results:
-        print("\nPitch-Specific Model Training Results:")
-        print("---------------------------------")
-        for model_key, metrics in results.items():
-            print(f"\n{model_key.title()} Model:")
-            print(f"  - Model Type: {metrics['model_type']}")
-            print(f"  - Training R² Score: {metrics['train_r2']:.4f}")
-            print(f"  - Training MAE: {metrics['train_mae']:.2f}")
-            print(f"  - Test R² Score: {metrics['test_r2']:.4f}")
-            print(f"  - Test MAE: {metrics['test_mae']:.2f}")
-            print(f"  - Features: {metrics['num_features']}")
-            
-            if metrics['top_features']:
-                print("\n  Top 10 Important Features/Coefficients:")
-                for feature, importance in metrics['top_features']:
-                    print(f"    - {feature}: {importance:.4f}") 
+    # Train models with multiple random seeds if requested
+    for iteration in range(args.iterations):
+        print(f"\n=== Training Iteration {iteration + 1}/{args.iterations} ===")
+        random_seed = 42 + iteration  # Use different seed for each iteration
+        
+        # Initialize trainer
+        trainer = PitchSpecificModelTrainer(data_dir=args.data_dir, models_dir=args.models_dir)
+        
+        # Train models
+        results = trainer.train_models()
+        
+        # Print results
+        if results:
+            print("\nPitch-Specific Model Training Results:")
+            print("---------------------------------")
+            for model_key, metrics in results.items():
+                print(f"\n{model_key.title()} Model:")
+                print(f"  - Model Type: {metrics['model_type']}")
+                print(f"  - Training R² Score: {metrics['train_r2']:.4f}")
+                print(f"  - Training MAE: {metrics['train_mae']:.2f}")
+                print(f"  - Test R² Score: {metrics['test_r2']:.4f}")
+                print(f"  - Test MAE: {metrics['test_mae']:.2f}")
+                print(f"  - Features: {metrics['num_features']}")
+                
+                if metrics['top_features']:
+                    print("\n  Top 10 Important Features/Coefficients:")
+                    for feature, importance in metrics['top_features']:
+                        print(f"    - {feature}: {importance:.4f}")
+                        
+            print("\n=======================================")
+            print(f"Training iteration {iteration + 1} completed successfully.") 

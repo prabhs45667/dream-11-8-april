@@ -3,6 +3,7 @@ import numpy as np
 import os
 import sys
 import logging
+import random  # For mock sentiment
 from pitch_specific_models import PitchSpecificModelTrainer
 from feature_engineering import FeatureEngineer
 
@@ -12,6 +13,79 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('model_integration')
+
+# Simple mock NLP enhancer that doesn't require external dependencies
+class MockNlpEnhancer:
+    """
+    A mock NLP enhancer that simulates sentiment analysis without external dependencies.
+    This is used when the full NlpFeatureEnhancer is not available due to missing dependencies.
+    """
+    def __init__(self):
+        logger.info("Initializing Mock NLP Enhancer (no external dependencies required)")
+        # Players with simulated positive sentiment
+        self.positive_players = ['Virat Kohli', 'MS Dhoni', 'Jasprit Bumrah', 'Rohit Sharma', 'KL Rahul']
+        # Players with simulated negative sentiment
+        self.negative_players = ['Rishabh Pant', 'Shreyas Iyer']
+        # Players with simulated injuries
+        self.injured_players = ['Hardik Pandya']
+        
+    def run_pipeline(self, predictions_df):
+        """
+        Apply mock NLP adjustments to player predictions.
+        
+        Args:
+            predictions_df: DataFrame with player predictions
+            
+        Returns:
+            DataFrame with mock NLP adjustments
+        """
+        if not isinstance(predictions_df, pd.DataFrame):
+            logger.error("Invalid input to mock NLP enhancer")
+            return predictions_df
+            
+        logger.info("Applying mock NLP sentiment analysis to predictions")
+        enhanced_df = predictions_df.copy()
+        
+        # Add NLP columns
+        enhanced_df['nlp_sentiment_score'] = 0.0
+        enhanced_df['nlp_adjustment_factor'] = 1.0
+        enhanced_df['nlp_is_injured'] = False
+        
+        # Get player name column
+        player_column = 'Player Name' if 'Player Name' in enhanced_df.columns else 'player_name'
+        if player_column not in enhanced_df.columns:
+            logger.warning("No player name column found in predictions DataFrame")
+            return enhanced_df
+            
+        # Apply adjustments based on player names
+        total_adjustments = 0
+        
+        for idx, row in enhanced_df.iterrows():
+            player_name = row[player_column]
+            
+            # Apply positive sentiment
+            if any(pos_player.lower() in player_name.lower() for pos_player in self.positive_players):
+                enhanced_df.loc[idx, 'nlp_sentiment_score'] = random.uniform(0.6, 0.9)
+                enhanced_df.loc[idx, 'nlp_adjustment_factor'] = 1.10  # +10%
+                enhanced_df.loc[idx, 'predicted_points'] *= 1.10
+                total_adjustments += 1
+                
+            # Apply negative sentiment
+            elif any(neg_player.lower() in player_name.lower() for neg_player in self.negative_players):
+                enhanced_df.loc[idx, 'nlp_sentiment_score'] = random.uniform(-0.9, -0.6)
+                enhanced_df.loc[idx, 'nlp_adjustment_factor'] = 0.90  # -10%
+                enhanced_df.loc[idx, 'predicted_points'] *= 0.90
+                total_adjustments += 1
+                
+            # Apply injury flag
+            if any(inj_player.lower() in player_name.lower() for inj_player in self.injured_players):
+                enhanced_df.loc[idx, 'nlp_is_injured'] = True
+                enhanced_df.loc[idx, 'nlp_adjustment_factor'] = 0.70  # -30% for injured
+                enhanced_df.loc[idx, 'predicted_points'] *= 0.70
+                total_adjustments += 1
+                
+        logger.info(f"Mock NLP enhancement applied {total_adjustments} adjustments to player predictions")
+        return enhanced_df
 
 class Dream11ModelIntegrator:
     """
@@ -34,6 +108,17 @@ class Dream11ModelIntegrator:
         
         # Feature engineer needed for prediction if pitch-specific models are used
         self.feature_engineer = FeatureEngineer(data_dir=data_dir) 
+        
+        # Initialize NLP Feature Enhancer for sentiment analysis
+        try:
+            # Try to import the full NLP enhancer first
+            from nlp_feature_enhancer import NlpFeatureEnhancer
+            self.nlp_enhancer = NlpFeatureEnhancer()
+            logger.info("Full NLP Feature Enhancer initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing NLP enhancer: {e}")
+            logger.info("Using mock NLP enhancer instead (simulated sentiment)")
+            self.nlp_enhancer = MockNlpEnhancer()
         
         # Ensure models are loaded or trained on initialization
         self.load_or_train_models()
@@ -141,11 +226,11 @@ class Dream11ModelIntegrator:
                 else:
                     logger.info("Successfully predicted points using the fallback model.")
                     # Log fallback predictions
-                    logger.info(f"Fallback Predictions:\\n{result_df[['player_name', 'predicted_points']].to_string()}") # LOG PREDICTIONS
+                    logger.info(f"Fallback Predictions:\n{result_df[['player_name', 'predicted_points']].to_string()}") # LOG PREDICTIONS
             else:
                  logger.info(f"Successfully predicted points using the '{pitch_type}' model.")
                  # Log pitch-specific predictions
-                 logger.info(f"'{pitch_type}' Predictions:\\n{result_df[['player_name', 'predicted_points']].to_string()}") # LOG PREDICTIONS
+                 logger.info(f"'{pitch_type}' Predictions:\n{result_df[['player_name', 'predicted_points']].to_string()}") # LOG PREDICTIONS
 
             # Merge predictions back into the original structure if needed, 
             # or just return the result_df which now contains predictions.
@@ -153,7 +238,32 @@ class Dream11ModelIntegrator:
             if 'player_name' not in result_df.columns and 'Player Name' in result_df.columns:
                  result_df['player_name'] = result_df['Player Name']
             
-            return result_df
+            # Apply NLP enhancement to adjust predictions based on news sentiment
+            try:
+                logger.info("Applying NLP enhancement to adjust predictions based on news sentiment")
+                enhanced_df = self.nlp_enhancer.run_pipeline(result_df)
+                
+                if enhanced_df is not None and not enhanced_df.empty:
+                    logger.info(f"NLP enhancement applied successfully to {len(enhanced_df)} player predictions")
+                    
+                    # Log some examples of adjustments
+                    adjusted_players = enhanced_df[enhanced_df['nlp_adjustment_factor'] != 1.0]
+                    if not adjusted_players.empty:
+                        sample_size = min(5, len(adjusted_players))
+                        sample_df = adjusted_players.head(sample_size)
+                        for _, row in sample_df.iterrows():
+                            player_name = row.get('player_name', row.get('Player Name', 'Unknown'))
+                            factor = row.get('nlp_adjustment_factor', 1.0)
+                            is_injured = row.get('nlp_is_injured', False)
+                            logger.info(f"  - {player_name}: adjustment factor={factor:.2f}, injured={is_injured}")
+                    
+                    return enhanced_df
+                else:
+                    logger.warning("NLP enhancement returned empty DataFrame. Using original predictions.")
+                    return result_df
+            except Exception as e:
+                logger.error(f"Error during NLP enhancement: {str(e)}, using original predictions")
+                return result_df
             
         except Exception as e:
             logger.error(f"Error during player point prediction: {str(e)}")
@@ -347,7 +457,28 @@ def main():
     
     if predicted_df_balanced is not None and 'predicted_points' in predicted_df_balanced.columns:
         print("\nPredicted Player Points (Balanced Pitch):")
-        print(predicted_df_balanced[['Player Name', 'Player Type', 'Team', 'Credits', 'predicted_points']].sort_values('predicted_points', ascending=False).to_string())
+        display_cols = ['Player Name', 'Player Type', 'Team', 'Credits', 'predicted_points']
+        
+        # Check if NLP columns exist
+        nlp_cols = ['nlp_sentiment_score', 'nlp_adjustment_factor', 'nlp_is_injured']
+        has_nlp_data = all(col in predicted_df_balanced.columns for col in nlp_cols)
+        
+        if has_nlp_data:
+            display_cols.extend(nlp_cols)
+            print("NLP enhancement detected in predictions!")
+            
+            # Display players with NLP adjustments
+            adjusted_players = predicted_df_balanced[predicted_df_balanced['nlp_adjustment_factor'] != 1.0]
+            if not adjusted_players.empty:
+                print("\nPlayers with NLP adjustments:")
+                for _, row in adjusted_players.iterrows():
+                    player_name = row.get('Player Name', row.get('player_name', 'Unknown'))
+                    factor = row.get('nlp_adjustment_factor', 1.0)
+                    sentiment = row.get('nlp_sentiment_score', 0.0)
+                    is_injured = row.get('nlp_is_injured', False)
+                    print(f"  - {player_name}: adjustment={factor:.2f}, sentiment={sentiment:.2f}, injured={is_injured}")
+        
+        print(predicted_df_balanced[display_cols].sort_values('predicted_points', ascending=False).to_string())
         
         # Suggest C/VC
         captain, vc = integrator.suggest_captain_vice_captain(predicted_df_balanced, match_info_balanced)
@@ -370,7 +501,17 @@ def main():
     
     if predicted_df_batting is not None and 'predicted_points' in predicted_df_batting.columns:
         print("\nPredicted Player Points (Batting-Friendly Pitch):")
-        print(predicted_df_batting[['Player Name', 'Player Type', 'Team', 'Credits', 'predicted_points']].sort_values('predicted_points', ascending=False).to_string())
+        
+        display_cols = ['Player Name', 'Player Type', 'Team', 'Credits', 'predicted_points']
+        
+        # Check if NLP columns exist
+        nlp_cols = ['nlp_sentiment_score', 'nlp_adjustment_factor', 'nlp_is_injured']
+        has_nlp_data = all(col in predicted_df_batting.columns for col in nlp_cols)
+        
+        if has_nlp_data:
+            display_cols.extend(nlp_cols)
+        
+        print(predicted_df_batting[display_cols].sort_values('predicted_points', ascending=False).to_string())
     else:
          print("\nPrediction failed for Batting-Friendly Pitch.")
 

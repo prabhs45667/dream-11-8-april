@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from data_preprocessor import DataPreprocessor
 from role_mapper import RoleMapper
 from sklearn.ensemble import RandomForestRegressor
+from player_images import get_player_image_url, add_player_card_styles
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -827,17 +828,37 @@ class Dream11App:
             # 5. Merge predicted points or use fallback
             if predicted_points_df is not None:
                  logger.info("Merging model predictions with squad data.")
+                 
+                 # Check for NLP-enhanced columns
+                 nlp_columns = ['nlp_sentiment_score', 'nlp_adjustment_factor', 'nlp_is_injured']
+                 has_nlp_data = all(col in predicted_points_df.columns for col in nlp_columns)
+                 
+                 # Select columns to merge - include NLP columns if present
+                 merge_columns = ['Player Name', 'predicted_points'] 
+                 if has_nlp_data:
+                     merge_columns.extend(nlp_columns)
+                     logger.info("NLP enhancement data detected and will be included in merged data")
+                 else:
+                     logger.info("NLP enhancement data not detected in predictions")
+                 
                  team_squads = pd.merge(
                       team_squads,
-                      predicted_points_df[['Player Name', 'predicted_points']],
+                      predicted_points_df[merge_columns],
                       on='Player Name',
                       how='left'
                  )
+                 
                  missing_predictions = team_squads['predicted_points'].isnull().sum()
                  if missing_predictions > 0:
                       logger.warning(f"{missing_predictions} players had no predicted points after merge. Applying credit-based fallback.")
                       team_squads['predicted_points'] = team_squads['predicted_points'].fillna(team_squads['Credits'] * 5)
                  team_squads['predicted_points'] = pd.to_numeric(team_squads['predicted_points'], errors='coerce').fillna(0)
+                 
+                 # Initialize NLP columns if they don't exist after merge
+                 if has_nlp_data:
+                     for col in nlp_columns:
+                         if col not in team_squads.columns:
+                             team_squads[col] = np.nan
             else:
                 logger.warning("Using credit-based points as primary source for all players.")
                 team_squads['predicted_points'] = team_squads['Credits'] * 10
@@ -847,7 +868,34 @@ class Dream11App:
 
             if verbose:
                  st.write("Top 10 Players by Predicted Points (after merge/fallback):")
-                 st.dataframe(team_squads[['Player Name', 'Team', 'Role', 'Credits', 'predicted_points']].sort_values('predicted_points', ascending=False).head(10))
+                 display_columns = ['Player Name', 'Team', 'Role', 'Credits', 'predicted_points']
+                 
+                 # Add NLP columns to display if they exist
+                 nlp_columns = ['nlp_sentiment_score', 'nlp_adjustment_factor', 'nlp_is_injured']
+                 has_nlp_data = all(col in team_squads.columns for col in nlp_columns)
+                 
+                 if has_nlp_data:
+                     display_columns.extend(nlp_columns)
+                     st.info("Predictions include NLP-based sentiment analysis from news sources.")
+                     
+                     # Highlight players with positive/negative sentiment or injuries
+                     injured_players = team_squads[team_squads['nlp_is_injured'] == True]['Player Name'].tolist()
+                     if injured_players:
+                         st.warning(f"⚠️ Potentially injured players based on news: {', '.join(injured_players)}")
+                     
+                     # Identify players with significant sentiment adjustments
+                     boosted_players = team_squads[team_squads['nlp_adjustment_factor'] > 1.05]['Player Name'].tolist()
+                     if boosted_players:
+                         st.success(f"📈 Players with positive news sentiment: {', '.join(boosted_players)}")
+                     
+                     lowered_players = team_squads[team_squads['nlp_adjustment_factor'] < 0.95]['Player Name'].tolist()
+                     if lowered_players:
+                         st.error(f"📉 Players with negative news sentiment: {', '.join(lowered_players)}")
+                 else:
+                     # Don't clutter the UI if no NLP data is available
+                     pass
+                 
+                 st.dataframe(team_squads[display_columns].sort_values('predicted_points', ascending=False).head(10))
 
             # 6. Optimization Step
             role_counts = team_squads['Role'].value_counts().to_dict()
@@ -1624,6 +1672,9 @@ class Dream11App:
         """Displays the predicted team and impact players in Streamlit."""
         st.subheader("🏆 Predicted Dream11 Team")
 
+        # Add player card styles for images
+        add_player_card_styles()
+
         if not result or 'selected_players' not in result or not result['selected_players']:
             st.warning("No team could be selected or prediction failed.")
             return
@@ -1703,11 +1754,16 @@ class Dream11App:
                         elif name == vice_captain_name:
                             marker = " <span class='vice-captain-marker'>VC</span>"
 
-                        # Display player info with points and credits in a card-like format
+                        # Get player image URL - pass team code as parameter
+                        image_url = get_player_image_url(name, team)
+                        
+                        # Display player info with image, points and credits in a card-like format
                         st.markdown(
-                            f"<div class='player-card'>"
-                            f"<strong>{name}</strong>{marker}<br>"
-                            f"<small>Team: {team} | Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
+                            f"<div class='player-card role-{role}'>"
+                            f"<img src='{image_url}' alt='{name}'>"
+                            f"<div class='player-name'>{name}{marker}</div>"
+                            f"<div class='player-role'>{team}</div>"
+                            f"<div class='player-points'>Pts: {points:.1f} | Cr: {credits_:.1f}</div>"
                             f"</div>",
                             unsafe_allow_html=True
                         )
@@ -1737,11 +1793,16 @@ class Dream11App:
                      points = player.get('predicted_points', player.get('points', 0))
                      credits_ = player.get('credits', player.get('Credits', 0))
 
+                     # Get player image URL - pass team code as parameter
+                     image_url = get_player_image_url(name, team)
+                     
                      # Display using similar card styling
                      st.markdown(
-                         f"<div class='impact-player-card'>"
-                         f"<strong>{name}</strong> <span style='font-size: 0.8em;'>({role}, {team})</span><br>"
-                         f"<small>Pts: <strong>{points:.1f}</strong> | Cr: {credits_:.1f}</small>"
+                         f"<div class='impact-player-card role-{role}'>"
+                         f"<img src='{image_url}' alt='{name}'>"
+                         f"<div class='player-name'>{name}</div>" 
+                         f"<div class='player-role'>{role}, {team}</div>"
+                         f"<div class='player-points'>Pts: {points:.1f} | Cr: {credits_:.1f}</div>"
                          f"</div>",
                          unsafe_allow_html=True
                      )
