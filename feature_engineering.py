@@ -259,7 +259,11 @@ class FeatureEngineer:
             # Apply column name mapping where needed
             for old_col, new_col in column_mapping.items():
                 if old_col in df.columns and new_col not in df.columns:
-                    df = df.rename(columns={old_col: new_col})
+                    # For Credits, preserve both columns for backward compatibility
+                    if old_col == 'Credits':
+                        df[new_col] = df[old_col].copy()
+                    else:
+                        df = df.rename(columns={old_col: new_col})
                     
             # Ensure required columns exist
             for required_col in ['player_name', 'role', 'team', 'credits']:
@@ -315,6 +319,14 @@ class FeatureEngineer:
                     df['credits'] = pd.to_numeric(df['credits'], errors='coerce')
                     # Fill any NaN values with a default
                     df['credits'].fillna(8.0, inplace=True)
+                    
+                    # Also ensure 'Credits' is available and numeric if it exists
+                    if 'Credits' in df.columns:
+                        df['Credits'] = pd.to_numeric(df['Credits'], errors='coerce')
+                        df['Credits'].fillna(8.0, inplace=True)
+                    else:
+                        # Add 'Credits' column for backwards compatibility
+                        df['Credits'] = df['credits'].copy()
                 except Exception as e:
                     logger.error(f"Error converting credits to numeric: {str(e)}")
                     
@@ -871,4 +883,354 @@ class FeatureEngineer:
             df['combined_value'] = 1.0
             df['weighted_score'] = 0.5
             logger.warning(f"Exiting add_interaction_features after exception. Df shape: {df.shape}")
+            return df
+
+    # --- New Partnership Analysis Implementation ---
+    def analyze_batting_partnerships(self, deliveries_df):
+        """
+        Analyze batting partnerships to identify strong player combinations
+        
+        Args:
+            deliveries_df (pd.DataFrame): Dataframe with ball-by-ball delivery data
+            
+        Returns:
+            dict: Dictionary with partnership metrics by player pair
+        """
+        logger.info("Analyzing batting partnerships...")
+        
+        if deliveries_df is None or deliveries_df.empty:
+            logger.warning("No delivery data available for partnership analysis")
+            return {}
+            
+        try:
+            # Ensure required columns exist
+            required_cols = ['batter', 'non_striker', 'runs_off_bat', 'match_id']
+            if not all(col in deliveries_df.columns for col in required_cols):
+                logger.warning(f"Missing required columns for partnership analysis. Required: {required_cols}")
+                return {}
+                
+            # Create partnership identifier (sorted player names to ensure consistent pairing)
+            deliveries_df['partnership'] = deliveries_df.apply(
+                lambda x: tuple(sorted([str(x['batter']), str(x['non_striker'])])), 
+                axis=1
+            )
+            
+            # Calculate runs per ball for each partnership
+            partnership_runs = deliveries_df.groupby(['match_id', 'partnership'])['runs_off_bat'].sum().reset_index()
+            
+            # Calculate balls faced by each partnership
+            partnership_balls = deliveries_df.groupby(['match_id', 'partnership']).size().reset_index(name='balls')
+            
+            # Merge runs and balls data
+            partnership_stats = pd.merge(partnership_runs, partnership_balls, on=['match_id', 'partnership'])
+            
+            # Calculate partnership metrics
+            partnership_metrics = partnership_stats.groupby('partnership').agg({
+                'runs_off_bat': ['sum', 'mean'],
+                'balls': ['sum', 'count']  # count gives number of innings
+            }).reset_index()
+            
+            # Flatten multi-level columns
+            partnership_metrics.columns = [
+                '_'.join(col).strip('_') if col[1] else col[0] for col in partnership_metrics.columns
+            ]
+            
+            # Calculate strike rate and other metrics
+            partnership_metrics['strike_rate'] = (
+                partnership_metrics['runs_off_bat_sum'] / partnership_metrics['balls_sum'] * 100
+            ).fillna(0)
+            
+            partnership_metrics['avg_runs_per_inning'] = (
+                partnership_metrics['runs_off_bat_sum'] / partnership_metrics['balls_count']
+            ).fillna(0)
+            
+            # Identify strong partnerships (above average strike rate and runs)
+            avg_sr = partnership_metrics['strike_rate'].mean()
+            avg_runs = partnership_metrics['avg_runs_per_inning'].mean()
+            
+            partnership_metrics['is_strong_partnership'] = (
+                (partnership_metrics['strike_rate'] > avg_sr) & 
+                (partnership_metrics['avg_runs_per_inning'] > avg_runs) &
+                (partnership_metrics['balls_count'] >= 3)  # At least 3 innings together
+            )
+            
+            # Convert to dictionary for easier lookup
+            partnerships_dict = {}
+            for _, row in partnership_metrics.iterrows():
+                player1, player2 = row['partnership']
+                metrics = row.drop('partnership').to_dict()
+                
+                # Store in both directions for easier lookup
+                if player1 not in partnerships_dict:
+                    partnerships_dict[player1] = {}
+                partnerships_dict[player1][player2] = metrics
+                
+                if player2 not in partnerships_dict:
+                    partnerships_dict[player2] = {}
+                partnerships_dict[player2][player1] = metrics
+                
+            logger.info(f"Completed partnership analysis for {len(partnership_metrics)} partnerships")
+            return partnerships_dict
+            
+        except Exception as e:
+            logger.error(f"Error in partnership analysis: {str(e)}", exc_info=True)
+            return {}
+    
+    # --- New Detailed Player vs Team Analysis ---
+    def analyze_player_vs_team(self, deliveries_df):
+        """
+        Analyze player performance against specific teams
+        
+        Args:
+            deliveries_df (pd.DataFrame): Dataframe with ball-by-ball delivery data
+            
+        Returns:
+            dict: Dictionary with player vs team metrics
+        """
+        logger.info("Analyzing player vs team performance...")
+        
+        if deliveries_df is None or deliveries_df.empty:
+            logger.warning("No delivery data available for player vs team analysis")
+            return {}
+            
+        try:
+            # Ensure required columns exist
+            required_cols = ['batter', 'bowler', 'runs_off_bat', 'batting_team', 'bowling_team', 'player_dismissed']
+            if not all(col in deliveries_df.columns for col in required_cols):
+                logger.warning(f"Missing required columns for player vs team analysis. Required: {required_cols}")
+                return {}
+                
+            # === Batting vs Team Analysis ===
+            # Calculate batting stats against each team
+            batting_vs_team = deliveries_df.groupby(['batter', 'bowling_team']).agg({
+                'runs_off_bat': ['sum', 'mean'],
+                'match_id': 'nunique',
+                'ball': 'count',
+            }).reset_index()
+            
+            # Flatten multi-level columns
+            batting_vs_team.columns = [
+                '_'.join(col).strip('_') if col[1] else col[0] for col in batting_vs_team.columns
+            ]
+            
+            # Calculate batting strike rate vs each team
+            batting_vs_team['bat_strike_rate_vs_team'] = (
+                batting_vs_team['runs_off_bat_sum'] / batting_vs_team['ball_count'] * 100
+            ).fillna(0)
+            
+            # Calculate batting average vs each team (need dismissals data)
+            # Group by batter, dismissal team
+            dismissals = deliveries_df[deliveries_df['player_dismissed'].notna()]
+            dismissals_by_team = dismissals.groupby(['player_dismissed', 'bowling_team']).size().reset_index(name='dismissals')
+            
+            # Merge with batting stats
+            batting_vs_team = pd.merge(
+                batting_vs_team, 
+                dismissals_by_team.rename(columns={'player_dismissed': 'batter'}),
+                on=['batter', 'bowling_team'], 
+                how='left'
+            )
+            
+            batting_vs_team['dismissals'] = batting_vs_team['dismissals'].fillna(0)
+            batting_vs_team['bat_avg_vs_team'] = np.where(
+                batting_vs_team['dismissals'] > 0,
+                batting_vs_team['runs_off_bat_sum'] / batting_vs_team['dismissals'],
+                batting_vs_team['runs_off_bat_sum'] * 2  # If not dismissed, double runs as proxy for avg
+            )
+            
+            # === Bowling vs Team Analysis ===
+            # For bowlers, get wickets against each team
+            wickets = deliveries_df[
+                deliveries_df['player_dismissed'].notna() & 
+                ~deliveries_df['wicket_type'].isin(['run out', 'retired hurt', 'obstructing the field'])
+            ]
+            
+            bowling_vs_team = wickets.groupby(['bowler', 'batting_team']).size().reset_index(name='wickets_vs_team')
+            
+            # Get runs conceded against each team
+            bowling_runs = deliveries_df.groupby(['bowler', 'batting_team'])['runs_off_bat'].sum().reset_index(name='runs_conceded_vs_team')
+            
+            # Get balls bowled against each team
+            bowling_balls = deliveries_df.groupby(['bowler', 'batting_team']).size().reset_index(name='balls_bowled_vs_team')
+            
+            # Merge bowling stats
+            bowling_vs_team = pd.merge(bowling_vs_team, bowling_runs, on=['bowler', 'batting_team'], how='outer')
+            bowling_vs_team = pd.merge(bowling_vs_team, bowling_balls, on=['bowler', 'batting_team'], how='outer')
+            
+            # Calculate bowling average and economy vs each team
+            bowling_vs_team['bowl_avg_vs_team'] = np.where(
+                bowling_vs_team['wickets_vs_team'] > 0,
+                bowling_vs_team['runs_conceded_vs_team'] / bowling_vs_team['wickets_vs_team'],
+                bowling_vs_team['runs_conceded_vs_team'] * 2  # If no wickets, double runs as proxy
+            )
+            
+            bowling_vs_team['bowl_economy_vs_team'] = (
+                bowling_vs_team['runs_conceded_vs_team'] / (bowling_vs_team['balls_bowled_vs_team'] / 6)
+            ).fillna(0)
+            
+            # Convert to dictionary for easier lookup
+            player_vs_team = {}
+            
+            # Process batting stats
+            for _, row in batting_vs_team.iterrows():
+                batter = row['batter']
+                team = row['bowling_team']
+                
+                if batter not in player_vs_team:
+                    player_vs_team[batter] = {'batting': {}, 'bowling': {}}
+                    
+                player_vs_team[batter]['batting'][team] = {
+                    'runs': row['runs_off_bat_sum'],
+                    'balls': row['ball_count'],
+                    'strike_rate': row['bat_strike_rate_vs_team'],
+                    'average': row['bat_avg_vs_team'],
+                    'matches': row['match_id_nunique'],
+                    'dismissals': row['dismissals']
+                }
+            
+            # Process bowling stats
+            for _, row in bowling_vs_team.iterrows():
+                bowler = row['bowler']
+                team = row['batting_team']
+                
+                if bowler not in player_vs_team:
+                    player_vs_team[bowler] = {'batting': {}, 'bowling': {}}
+                    
+                player_vs_team[bowler]['bowling'][team] = {
+                    'wickets': row['wickets_vs_team'],
+                    'runs_conceded': row['runs_conceded_vs_team'],
+                    'balls': row['balls_bowled_vs_team'],
+                    'average': row['bowl_avg_vs_team'],
+                    'economy': row['bowl_economy_vs_team']
+                }
+                
+            logger.info(f"Completed player vs team analysis for {len(player_vs_team)} players")
+            return player_vs_team
+            
+        except Exception as e:
+            logger.error(f"Error in player vs team analysis: {str(e)}", exc_info=True)
+            return {}
+            
+    def add_player_specific_features(self, df, partnership_data=None, player_vs_team_data=None):
+        """
+        Add player-specific features to the main dataframe including partnership
+        and vs-team metrics
+        
+        Args:
+            df (pd.DataFrame): Player dataframe
+            partnership_data (dict): Partnership metrics by player
+            player_vs_team_data (dict): Player vs team metrics
+            
+        Returns:
+            pd.DataFrame: Enhanced dataframe with added features
+        """
+        logger.info("Adding player-specific features...")
+        
+        if df is None or df.empty:
+            logger.warning("No player data available for feature enhancement")
+            return df
+            
+        try:
+            # Make a copy to avoid modifying the original
+            enhanced_df = df.copy()
+            
+            # Get player names - try different possible column names
+            player_col = None
+            for col in ['player_name', 'Player Name', 'Player', 'name', 'player']:
+                if col in enhanced_df.columns:
+                    player_col = col
+                    break
+                    
+            if player_col is None:
+                logger.warning("Could not find player name column. Cannot add player-specific features.")
+                return df
+                
+            # Initialize new feature columns
+            enhanced_df['has_strong_partnership'] = 0
+            enhanced_df['partnership_strike_rate'] = 0
+            enhanced_df['partnership_avg_runs'] = 0
+            enhanced_df['vs_opposition_bat_avg'] = 0
+            enhanced_df['vs_opposition_bowl_avg'] = 999
+            enhanced_df['vs_opposition_bat_sr'] = 0
+            enhanced_df['favorable_matchup'] = 0
+            
+            # Add partnership features if data available
+            if partnership_data:
+                logger.info("Adding partnership features...")
+                for idx, row in enhanced_df.iterrows():
+                    player = row[player_col]
+                    
+                    # Get partnerships for this player
+                    player_partnerships = partnership_data.get(player, {})
+                    
+                    if player_partnerships:
+                        # Calculate average partnership metrics
+                        partnership_sr = np.mean([
+                            p.get('strike_rate', 0) for p in player_partnerships.values()
+                        ])
+                        
+                        partnership_runs = np.mean([
+                            p.get('avg_runs_per_inning', 0) for p in player_partnerships.values()
+                        ])
+                        
+                        # Check if player has any strong partnerships
+                        has_strong = any(
+                            p.get('is_strong_partnership', False) for p in player_partnerships.values()
+                        )
+                        
+                        # Update dataframe
+                        enhanced_df.at[idx, 'partnership_strike_rate'] = partnership_sr
+                        enhanced_df.at[idx, 'partnership_avg_runs'] = partnership_runs
+                        enhanced_df.at[idx, 'has_strong_partnership'] = 1 if has_strong else 0
+            
+            # Add player vs team features if data available
+            if player_vs_team_data and 'opposition' in enhanced_df.columns:
+                logger.info("Adding player vs opposition team features...")
+                
+                for idx, row in enhanced_df.iterrows():
+                    player = row[player_col]
+                    opposition = row['opposition']
+                    
+                    # Get player vs team data
+                    player_data = player_vs_team_data.get(player, {})
+                    
+                    # Add batting vs team metrics
+                    if 'batting' in player_data and opposition in player_data['batting']:
+                        bat_stats = player_data['batting'][opposition]
+                        enhanced_df.at[idx, 'vs_opposition_bat_avg'] = bat_stats.get('average', 0)
+                        enhanced_df.at[idx, 'vs_opposition_bat_sr'] = bat_stats.get('strike_rate', 0)
+                        
+                    # Add bowling vs team metrics
+                    if 'bowling' in player_data and opposition in player_data['bowling']:
+                        bowl_stats = player_data['bowling'][opposition]
+                        enhanced_df.at[idx, 'vs_opposition_bowl_avg'] = bowl_stats.get('average', 999)
+                        
+                    # Determine if this is a favorable matchup
+                    # For batsmen: higher avg and SR vs this team is good
+                    # For bowlers: lower bowling avg vs this team is good
+                    player_role = row.get('role', row.get('Player Type', 'BAT'))
+                    
+                    if 'BAT' in player_role or 'WK' in player_role:
+                        # For batsmen, compare their average vs this team to their overall average
+                        overall_avg = row.get('batting_avg', 0)
+                        vs_team_avg = enhanced_df.at[idx, 'vs_opposition_bat_avg']
+                        enhanced_df.at[idx, 'favorable_matchup'] = 1 if vs_team_avg > overall_avg else 0
+                        
+                    elif 'BOWL' in player_role:
+                        # For bowlers, compare their average vs this team to their overall average
+                        overall_avg = row.get('bowling_avg', 999)
+                        vs_team_avg = enhanced_df.at[idx, 'vs_opposition_bowl_avg']
+                        enhanced_df.at[idx, 'favorable_matchup'] = 1 if vs_team_avg < overall_avg else 0
+                        
+                    else:  # All-rounders
+                        # Consider both batting and bowling
+                        bat_favorable = enhanced_df.at[idx, 'vs_opposition_bat_avg'] > row.get('batting_avg', 0)
+                        bowl_favorable = enhanced_df.at[idx, 'vs_opposition_bowl_avg'] < row.get('bowling_avg', 999)
+                        enhanced_df.at[idx, 'favorable_matchup'] = 1 if (bat_favorable or bowl_favorable) else 0
+            
+            logger.info("Completed adding player-specific features")
+            return enhanced_df
+            
+        except Exception as e:
+            logger.error(f"Error adding player-specific features: {str(e)}", exc_info=True)
             return df

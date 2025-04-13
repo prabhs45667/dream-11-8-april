@@ -429,6 +429,170 @@ class Dream11ModelIntegrator:
             traceback.print_exc()
             return None, None
 
+    def prepare_optimization_problem(self, player_data, match_info):
+        """
+        Prepare the optimization problem structure for team selection
+        
+        Args:
+            player_data (pd.DataFrame): Player data with predicted points
+            match_info (dict): Match information including venue and teams
+            
+        Returns:
+            dict: Problem structure for the team optimizer
+        """
+        try:
+            # Ensure we have predicted points
+            if 'predicted_points' not in player_data.columns or player_data['predicted_points'].isnull().all():
+                logger.error("Player data missing predicted points, cannot prepare optimization problem")
+                return None
+                
+            # Extract role requirements based on pitch type
+            role_requirements = self.identify_team_balance_requirements(match_info)
+            if not role_requirements:
+                logger.warning("Could not determine role requirements. Using default requirements.")
+                role_requirements = {
+                    'WK': {'min': 1, 'max': 4},
+                    'BAT': {'min': 3, 'max': 5},
+                    'AR': {'min': 1, 'max': 4},
+                    'BOWL': {'min': 3, 'max': 5}
+                }
+            
+            # Convert role requirements from dict of dicts to dict of tuples (min, max)
+            role_reqs = {
+                role: (requirements['min'], requirements['max'])
+                for role, requirements in role_requirements.items()
+            }
+                
+            # Extract team names
+            home_team = match_info.get('home_team')
+            away_team = match_info.get('away_team')
+            if not home_team or not away_team:
+                logger.warning("Missing home_team or away_team in match_info. Using default values.")
+                home_team = 'Team1'
+                away_team = 'Team2'
+                
+            # Create players dictionary
+            players_dict = {}
+            for idx, player in player_data.iterrows():
+                # Try different column names to handle various data formats
+                player_name = player.get('Player Name', player.get('player_name', player.get('Player', str(idx))))
+                team = player.get('Team', player.get('team', 'Unknown'))
+                role = player.get('role', player.get('Role', player.get('Player Type', 'BAT')))
+                credits = float(player.get('Credits', player.get('credits', 8.0)))
+                points = float(player.get('predicted_points', 0))
+                
+                # Normalize role to standard format
+                std_role = self._standardize_role(role)
+                
+                # Create player entry
+                players_dict[player_name] = {
+                    'name': player_name,
+                    'team': team,
+                    'role': std_role,
+                    'credits': credits,
+                    'points': points
+                }
+                
+                # Add form and consistency if available
+                if 'fantasy_points_last_5' in player:
+                    players_dict[player_name]['fantasy_points_last_5'] = player['fantasy_points_last_5']
+                if 'fantasy_points_std_dev' in player:
+                    players_dict[player_name]['fantasy_points_std_dev'] = player['fantasy_points_std_dev']
+                    
+            # Create problem structure
+            problem = {
+                'players': players_dict,
+                'role_requirements': role_reqs,
+                'max_credits': 100,
+                'team_ratio_limit': 7,
+                'max_players': 11
+            }
+            
+            logger.info(f"Prepared optimization problem with {len(players_dict)} players")
+            return problem
+            
+        except Exception as e:
+            logger.error(f"Error preparing optimization problem: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+            
+    def _standardize_role(self, role):
+        """Standardize player role to one of: WK, BAT, AR, BOWL"""
+        role_str = str(role).upper()
+        if 'WK' in role_str or 'KEEPER' in role_str:
+            return 'WK'
+        elif 'BAT' in role_str:
+            return 'BAT'
+        elif 'BOWL' in role_str:
+            return 'BOWL'
+        elif 'ALL' in role_str or 'AR' in role_str:
+            return 'AR'
+        else:
+            return 'BAT'  # Default to batsman
+
+    def generate_team(self, player_data, match_info):
+        """
+        Generate a team using optimization or fallback to greedy selection
+        
+        Args:
+            player_data (pd.DataFrame): Player data with predicted points
+            match_info (dict): Match information including venue and teams
+            
+        Returns:
+            dict: Selected team result
+        """
+        try:
+            # Prepare optimization problem
+            problem = self.prepare_optimization_problem(player_data, match_info)
+            if not problem:
+                logger.error("Failed to prepare optimization problem")
+                return None
+                
+            # Initialize team optimizer
+            from team_optimizer import TeamOptimizer
+            optimizer = TeamOptimizer()
+            
+            # Attempt optimization
+            logger.info("Attempting team optimization...")
+            team_result = optimizer.optimize_team(problem)
+            
+            if team_result and 'players' in team_result and team_result['players']:
+                logger.info("Team optimization successful")
+                return team_result
+                
+            # If optimization fails, try greedy approach
+            logger.warning("Optimization failed, falling back to greedy selection")
+            home_team = match_info.get('home_team', 'Team1')
+            away_team = match_info.get('away_team', 'Team2')
+            
+            # Prepare role requirements for greedy selection
+            role_requirements = {}
+            if 'role_requirements' in problem:
+                role_requirements = problem['role_requirements']
+            
+            # Perform greedy selection, passing the player_data directly (not the nested problem)
+            # This avoids the issue with "missing 'players' key" in the fallback
+            greedy_result = optimizer._greedy_team_selection(
+                player_data,  # Pass the original player_data DataFrame instead of problem
+                home_team, 
+                away_team, 
+                role_requirements
+            )
+            
+            if greedy_result:
+                logger.info("Greedy selection successful")
+                return greedy_result
+            else:
+                logger.error("Greedy selection also failed")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error generating team: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+
 # Main function for testing integration logic
 def main():
     # Initialize integrator

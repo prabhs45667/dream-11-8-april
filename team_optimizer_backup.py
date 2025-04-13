@@ -79,86 +79,44 @@ class TeamOptimizer:
     def create_optimization_problem(self, squad_data):
         """Create optimization problem for team selection"""
         try:
-            # Debug information to help troubleshoot
-            print(f"create_optimization_problem received data of type: {type(squad_data)}")
-            
-            # Check if squad_data is a dictionary (problem format) and convert to DataFrame
-            if isinstance(squad_data, dict):
-                if 'players' in squad_data:
-                    print("Converting problem dictionary to DataFrame for optimization")
-                    players_dict = squad_data['players']
-                    # Extract player data from the dictionary format
-                    player_records = []
-                    for player_id, player_data in players_dict.items():
-                        player_record = player_data.copy()
-                        player_record['player_id'] = player_id
-                        player_records.append(player_record)
-                    
-                    # Create DataFrame from player records
-                    squad_data = pd.DataFrame(player_records)
-                    
-                    # Ensure required columns exist
-                    if 'points' in squad_data.columns and 'predicted_points' not in squad_data.columns:
-                        squad_data['predicted_points'] = squad_data['points']
-                    
-                    if 'name' in squad_data.columns and 'Player Name' not in squad_data.columns:
-                        squad_data['Player Name'] = squad_data['name']
-                    
-                    print(f"Converted {len(squad_data)} players to DataFrame format")
-                else:
-                    print("ERROR: Received a dictionary without 'players' key")
-                    return None, None, pd.DataFrame()
-            
-            if not isinstance(squad_data, pd.DataFrame):
-                print(f"ERROR: After conversion, squad_data is not a DataFrame, but {type(squad_data)}")
+            # Check inputs
+            if squad_data is None or len(squad_data) < 11:
+                print(f"Error: Not enough players ({len(squad_data) if squad_data is not None else 0}) to select a team")
                 return None, None, pd.DataFrame()
-            
-            # Create a copy to avoid modifying the original
+
+            # Create a copy to avoid modifying original data
             squad_data = squad_data.copy()
             
-            # Standardize the credits column
-            squad_data, credits_col = self.standardize_credits_column(squad_data)
-            
-            # Now it's safe to access .columns because we've verified it's a DataFrame
-            # Ensure predicted_points exist
-            if 'predicted_points' not in squad_data.columns:
-                print("WARNING: predicted_points column not found, creating based on credits")
-                if credits_col is not None:
-                    # Use the standardized credits column
-                    squad_data['predicted_points'] = squad_data[credits_col].astype(float) * 100
+            # Ensure all required columns exist
+            if 'role' not in squad_data.columns:
+                if 'Player Type' in squad_data.columns:
+                    squad_data['role'] = squad_data['Player Type'].apply(self.standardize_role)
                 else:
-                    # Default value if no credits column
-                    squad_data['predicted_points'] = 500
-                    print("WARNING: No credits column found, using default predicted points")
+                    print("Error: No role/Player Type column found")
+                    return None, None, pd.DataFrame()
             
-            # Cap player points to a realistic maximum (150)
-            if 'predicted_points' in squad_data.columns:
-                print("Capping player points to realistic values (max 150)")
-                # Find the 90th percentile of predicted points
-                p90 = squad_data['predicted_points'].quantile(0.9)
-                # Apply point capping: min of original points, 150, or 2*p90
-                max_allowed = min(150, 2 * p90)
-                squad_data['original_points'] = squad_data['predicted_points'].copy()
-                squad_data['predicted_points'] = squad_data['predicted_points'].clip(upper=max_allowed)
-                # Log scaling to compress extremely high values
-                high_values = squad_data['predicted_points'] > 100
-                if high_values.any():
-                    squad_data.loc[high_values, 'predicted_points'] = 100 + 10 * np.log(squad_data.loc[high_values, 'predicted_points'] - 99)
-                print(f"Points capped at {max_allowed}. Mean: {squad_data['predicted_points'].mean():.2f}, Max: {squad_data['predicted_points'].max():.2f}")
-                # Ensure total points are less than 1000
-                if squad_data['predicted_points'].sum() > 1000:
-                    scaling_factor = 1000 / squad_data['predicted_points'].sum()
-                    squad_data['predicted_points'] = squad_data['predicted_points'] * scaling_factor
-                    print(f"Scaling player points by {scaling_factor:.2f} to keep total under 1000")
-            
-            # Ensure roles are standardized
-            if 'Player Type' in squad_data.columns and 'role' not in squad_data.columns:
-                squad_data['role'] = squad_data['Player Type'].apply(self.standardize_role)
-            elif 'role' in squad_data.columns:
-                squad_data['role'] = squad_data['role'].apply(self.standardize_role)
+            # Standardize credits column
+            credits_col = None
+            if 'Credits' in squad_data.columns:
+                squad_data['credits'] = squad_data['Credits'].astype(float)
+                credits_col = 'credits'
+            elif 'credits' in squad_data.columns:
+                squad_data['credits'] = pd.to_numeric(squad_data['credits'], errors='coerce').fillna(8.0)
+                credits_col = 'credits'
             else:
-                print("WARNING: No role column found in squad data. Adding default roles")
-                squad_data['role'] = 'BAT'  # Default role
+                print("Warning: No credits column found. Using default values.")
+                squad_data['credits'] = 8.0  # Default credits
+                credits_col = 'credits'
+            
+            # Make sure predicted_points column exists
+            if 'predicted_points' not in squad_data.columns:
+                if credits_col:
+                    # Use credits as a proxy for predicted points
+                    print("Warning: No predicted_points column found. Using credits as proxy.")
+                    squad_data['predicted_points'] = squad_data[credits_col] * 10.0  # Simple scaling
+            else:
+                    print("Warning: No predicted_points and no credits column found. Using default values.")
+                    squad_data['predicted_points'] = 50.0  # Default points
                 
             # Validate roles
             role_counts = squad_data['role'].value_counts().to_dict()
@@ -1333,8 +1291,7 @@ class TeamOptimizer:
                     else:
                         # Default value if no credits column exists
                         selected_team['predicted_points'] = 500
-                        print("WARNING: No credits column found, using default predicted points")
-                
+                    
                 # Create role if it doesn't exist
                 if 'role' not in selected_team.columns:
                     selected_team['role'] = 'BAT'  # Default role
@@ -1354,16 +1311,13 @@ class TeamOptimizer:
             captain_series['is_vice_captain'] = False
             captain_series['multiplier'] = 2.0  # Captain gets 2x points
             
-            # Select vice captain (randomly from next 2 top players or if not enough, from remaining)
-            if len(sorted_team) >= 3:
-                vice_captain_options = sorted_team.iloc[1:3]
-                vice_captain_idx = np.random.choice(vice_captain_options.index)
-                vice_captain = sorted_team.loc[vice_captain_idx]
+            # Select vice captain (always select the second-highest player)
+            if len(sorted_team) >= 2:
+                # Always select the second-highest player as vice-captain
+                vice_captain = sorted_team.iloc[1]
             else:
-                # If only 1 or 2 players, select randomly or the second player
-                remaining_players = sorted_team.iloc[1:] if len(sorted_team) > 1 else sorted_team
-                vice_captain_idx = np.random.choice(remaining_players.index)
-                vice_captain = sorted_team.loc[vice_captain_idx]
+                # In the rare case with only 1 player, use that player
+                vice_captain = sorted_team.iloc[0]
                 
             vice_captain_series = vice_captain.copy()
             vice_captain_series['is_captain'] = False

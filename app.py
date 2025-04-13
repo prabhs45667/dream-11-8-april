@@ -326,23 +326,35 @@ class Dream11App:
             if pitch_type == 'batting_friendly':
                 # Increase importance of batting features
                 for feat in batting_features:
-                    X_modified[feat] = X_modified[feat] * 1.25
+                    if feat in X_modified.columns:
+                        X_modified[feat] = X_modified[feat] * 1.25 # Indent this line
                 # Add interaction features for batting
                 if len(batting_features) >= 2:
-                    for i in range(min(3, len(batting_features))):
-                        X_modified[f'batting_interaction_{i}'] = X_modified[batting_features[i]] * \
-                                                               X_modified[batting_features[min(i+1, len(batting_features)-1)]]
-                
+                    valid_bat_features = [f for f in batting_features if f in X_modified.columns]
+                    for i in range(min(3, len(valid_bat_features))):
+                         idx1 = i
+                         idx2 = min(i + 1, len(valid_bat_features) - 1)
+                         if idx1 < len(valid_bat_features) and idx2 < len(valid_bat_features):
+                             # Use parentheses for multi-line expression
+                             X_modified[f'batting_interaction_{i}'] = (X_modified[valid_bat_features[idx1]] *
+                                                                       X_modified[valid_bat_features[idx2]])
+
             elif pitch_type == 'bowling_friendly':
                 # Increase importance of bowling features
                 for feat in bowling_features:
-                    X_modified[feat] = X_modified[feat] * 1.25
+                     if feat in X_modified.columns:
+                        X_modified[feat] = X_modified[feat] * 1.25 # Indent this line
                 # Add interaction features for bowling
                 if len(bowling_features) >= 2:
-                    for i in range(min(3, len(bowling_features))):
-                        X_modified[f'bowling_interaction_{i}'] = X_modified[bowling_features[i]] * \
-                                                               X_modified[bowling_features[min(i+1, len(bowling_features)-1)]]
-            
+                    valid_bowl_features = [f for f in bowling_features if f in X_modified.columns]
+                    for i in range(min(3, len(valid_bowl_features))):
+                         idx1 = i
+                         idx2 = min(i + 1, len(valid_bowl_features) - 1)
+                         if idx1 < len(valid_bowl_features) and idx2 < len(valid_bowl_features):
+                             # Use parentheses for multi-line expression
+                             X_modified[f'bowling_interaction_{i}'] = (X_modified[valid_bowl_features[idx1]] *
+                                                                       X_modified[valid_bowl_features[idx2]])
+
             # Custom hyperparameters based on pitch type
             if pitch_type == 'batting_friendly':
                 model = RandomForestRegressor(
@@ -941,26 +953,41 @@ class Dream11App:
                      logger.error("TeamOptimizer not initialized.")
                      raise ValueError("Optimizer not available.")
 
-                selected_team_result = self.optimizer.solve_optimization_problem(problem)
+                # Use Monte Carlo team selection method instead of standard optimization
+                num_monte_carlo_iterations = 10  # More iterations = better results but slower
+                logger.info(f"Using Monte Carlo team selection with {num_monte_carlo_iterations} iterations")
+                problem['team1'] = home_team
+                problem['team2'] = away_team
+                
+                selected_team_result = self.optimizer.monte_carlo_team_selection(problem, num_iterations=num_monte_carlo_iterations)
+                logger.info("Monte Carlo team generation completed with 10 iterations")
+                
+                # Log core and flex players information
+                if selected_team_result and 'variance_analysis' in selected_team_result:
+                    variance_analysis = selected_team_result['variance_analysis']
+                    if 'core_players' in variance_analysis:
+                        core_players = variance_analysis['core_players']
+                        logger.info(f"Core players (>70% selection rate): {core_players}")
+                    if 'flex_players' in variance_analysis:
+                        flex_players = variance_analysis['flex_players']
+                        logger.info(f"Flex players (30-70% selection rate): {flex_players}")
 
                 # Check the result type and handle accordingly
-                if isinstance(selected_team_result, list) and len(selected_team_result) > 0:
-                    # Optimization succeeded and returned a list of players
-                    logger.info(f"Optimization successful (returned list of {len(selected_team_result)} players).")
-                    # Convert list to the expected dictionary format for downstream processing
-                    selected_team_result = {
-                        'selected_players': selected_team_result,
-                        'details': 'Optimization successful'
-                    }
-                elif isinstance(selected_team_result, dict) and selected_team_result.get('selected_players'):
-                    # Result is already a dictionary (possibly from fallback or other path)
-                    logger.info("Selection successful (received dictionary).")
-                    # No conversion needed, use as is
+                if isinstance(selected_team_result, dict) and 'players' in selected_team_result:
+                    # Result is already a dictionary format for downstream processing
+                    logger.info("Monte Carlo selection successful.")
+                    if 'variance_analysis' in selected_team_result:
+                        # Convert to standard format expected by downstream methods
+                        selected_team_result = {
+                            'selected_players': selected_team_result['players'],
+                            'total_points': selected_team_result.get('total_points', 0),
+                            'variance_analysis': selected_team_result['variance_analysis']
+                        }
                 else:
                     # Optimization failed or returned unexpected format
-                    logger.warning(f"Optimization failed or returned unexpected format: {type(selected_team_result)}. Trying greedy fallback.")
+                    logger.warning(f"Monte Carlo optimization failed or returned unexpected format: {type(selected_team_result)}. Trying greedy fallback.")
                     # Ensure we have a clean slate for fallback
-                    selected_team_result = None  
+                    selected_team_result = None 
                     greedy_result = self._fallback_greedy_selection(team_squads, role_requirements)
                     
                     if isinstance(greedy_result, dict) and greedy_result.get('selected_players'):
