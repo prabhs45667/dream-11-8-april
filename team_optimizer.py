@@ -1324,20 +1324,20 @@ class TeamOptimizer:
             if not all(col in selected_team.columns for col in ['predicted_points', 'role']):
                 print("WARNING: Missing required columns for captain selection")
                 
-                # Create predicted_points if it doesn't exist
-                if 'predicted_points' not in selected_team.columns:
-                    print("WARNING: No predicted_points column, creating based on credits")
-                    if credits_col is not None:
-                        # Use standardized credits column
-                        selected_team['predicted_points'] = selected_team[credits_col].astype(float) * 100
-                    else:
-                        # Default value if no credits column exists
-                        selected_team['predicted_points'] = 500
-                        print("WARNING: No credits column found, using default predicted points")
+            # Create predicted_points if it doesn't exist
+            if 'predicted_points' not in selected_team.columns:
+                print("WARNING: No predicted_points column, creating based on credits")
+                if credits_col is not None:
+                    # Use standardized credits column
+                    selected_team['predicted_points'] = selected_team[credits_col].astype(float) * 100
+                else:
+                    # Default value if no credits column exists
+                    selected_team['predicted_points'] = 500
+                    print("WARNING: No credits column found, using default predicted points")
                 
-                # Create role if it doesn't exist
-                if 'role' not in selected_team.columns:
-                    selected_team['role'] = 'BAT'  # Default role
+            # Create role if it doesn't exist
+            if 'role' not in selected_team.columns:
+                selected_team['role'] = 'BAT'  # Default role
             
             # Sort by predicted points
             sorted_team = selected_team.sort_values('predicted_points', ascending=False)
@@ -1522,7 +1522,7 @@ class TeamOptimizer:
         except Exception as e:
             self.logger.error(f"Error in manual impact player selection: {e}")
             self.logger.error(traceback.format_exc())
-            return pd.DataFrame()
+            return pd.DataFrame() 
     
     # --- New Monte Carlo Team Selection Method ---
     def monte_carlo_team_selection(self, problem, num_iterations=5, variance_factor=0.2):
@@ -1727,4 +1727,4 @@ class TeamOptimizer:
             print(f"mc_problem['players'] has {len(mc_problem['players'])} entries")
         
         return mc_problem
-    # --- End Monte Carlo Implementation --- 
+    # --- End Monte Carlo Implementation ---
